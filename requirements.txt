@@ -1,0 +1,10 @@
+# aiohttp：网络请求（AstrBot 本体已自带，这里写出来是为了满足 pip 的解析习惯）
+aiohttp>=3.9
+# Pillow：SerpApi 的图片上传限制 500KB，超过的图要先压缩（AstrBot 镜像一般已自带）
+pillow>=9.0
+
+# 浏览器（Chrome/Chromium/Edge）不是 Python 依赖，但要启用谷歌 Lens 的本地模式就必须有它：
+#   Windows/macOS：装个 Chrome 或 Edge 即可（装了 playwright 的话它自带的 chromium 会被自动识别）
+#   Debian/Ubuntu：apt install chromium
+#   Alpine：apk add chromium
+# 只想用 SerpApi 的话，完全不需要浏览器。

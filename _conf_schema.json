@@ -1,0 +1,179 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用鱼鱼找鸡",
+    "default": true,
+    "hint": "关掉后指令会直接回「现在是关的」，不消耗任何额度。"
+  },
+  "engines": {
+    "type": "list",
+    "description": "启用哪些反查引擎",
+    "default": [
+      "lens",
+      "saucenao",
+      "tracemoe"
+    ],
+    "hint": "lens = 谷歌 Lens（真人照片只能靠它，需要浏览器 + 代理）；saucenao / iqdb 适合动漫图；tracemoe 适合动画截图。可选：lens / saucenao / tracemoe / iqdb。"
+  },
+  "serpapi_enabled": {
+    "type": "bool",
+    "description": "用 SerpApi 代替本地浏览器查 Lens",
+    "default": false,
+    "hint": "开启后走 SerpApi 的 Google Lens 接口：不需要浏览器、不会被谷歌人机验证挡住，结果是真实地址可直接抽账号。按次计费（见 serpapi.com 套餐）。未开启或没填 API key 时，自动回退到本地 Chrome/Chromium。"
+  },
+  "serpapi_api_key": {
+    "type": "string",
+    "description": "SerpApi API key",
+    "default": "",
+    "hint": "在 serpapi.com 注册后于 Dashboard 复制。留空等于没开（会回退本地浏览器）。注意图片会被上传到 SerpApi 以完成搜索。"
+  },
+  "timeout_sec": {
+    "type": "int",
+    "description": "单引擎超时（秒）",
+    "default": 45,
+    "hint": "Lens 冷启动 + 渲染通常 10~25 秒，别调太小。"
+  },
+  "max_accounts": {
+    "type": "int",
+    "description": "最多报几个账号",
+    "default": 3
+  },
+  "strict_consensus": {
+    "type": "bool",
+    "description": "严格按名字共识过滤",
+    "default": true,
+    "hint": "开着时，只要能判断出「谁是这张图的人」，名字对不上的号一律不报（宁缺毋滥）。关掉会把翻到的号都列出来，自己认。"
+  },
+  "lens_max_resolve": {
+    "type": "int",
+    "description": "Lens 最多解析几个结果链接",
+    "default": 10,
+    "hint": "每解析一条约 1~3 秒。社交平台（X/微博/Instagram…）的结果优先解析。"
+  },
+  "proxy": {
+    "type": "string",
+    "description": "出站代理（留空则用 AstrBot 全局代理）",
+    "default": "",
+    "hint": "例如 http://127.0.0.1:7890。谷歌在国内直连不通，Lens 必须走代理。"
+  },
+  "use_astrbot_proxy": {
+    "type": "bool",
+    "description": "复用 AstrBot 全局 http_proxy",
+    "default": true,
+    "hint": "插件配置的 proxy 为空时，自动使用 AstrBot 设置里的 http_proxy。"
+  },
+  "browser_exe": {
+    "type": "string",
+    "description": "Chrome/Edge 可执行文件路径",
+    "default": "",
+    "hint": "留空自动探测。Docker 里可以填 /usr/bin/chromium。"
+  },
+  "browser_headless": {
+    "type": "bool",
+    "description": "浏览器无头模式",
+    "default": true,
+    "hint": "默认无头；如果谷歌一直不给结果，可以试着关掉（窗口会被放到屏幕外）。"
+  },
+  "browser_profile": {
+    "type": "string",
+    "description": "浏览器 profile 目录（固定后能复用 cookie）",
+    "default": "",
+    "hint": "留空则用 data/plugin_data/astrbot_plugin_fish_find_chicken/browser_profile。谷歌会把「已通过验证」记在 cookie 里，固定 profile 能明显降低人机验证概率，冷启动也更快。想人工过一次验证码可把 browser_headless 关掉，窗口会出现在屏幕外。"
+  },
+  "browser_cdp": {
+    "type": "string",
+    "description": "外部浏览器 CDP 地址（独立 Chrome 容器时填）",
+    "default": "",
+    "hint": "例如 http://chrome:9222。填了就不再本地启动浏览器，改为连接这个已在运行的 Chrome；AstrBot 镜像里也就无需装 chromium。要求该 Chrome 以 --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 启动，并且它自己配好代理（插件无法远程给它设代理）。留空 = 本地启动。"
+  },
+  "browser_cdp_insecure": {
+    "type": "bool",
+    "description": "外部浏览器是 https 自签证书时跳过证书校验",
+    "default": false,
+    "hint": "只有 CDP 地址以 https:// 开头、且证书是自签（内网反代常见）时才需要打开。纯内网调试端口用 http:// 更简单，也不需要这个开关。"
+  },
+  "google_cookie": {
+    "type": "text",
+    "description": "谷歌 cookie（降低人机验证概率）",
+    "default": "",
+    "hint": "在你自己**已经过验证**的浏览器里打开 google.com，从开发者工具复制 Cookie 头整串粘进来，形如 NID=xxx; SID=yyy。注意：谷歌的反滥用 cookie 与出口 IP 绑定，必须和查询用同一个出口 IP。留空则不带。"
+  },
+  "cooldown_sec": {
+    "type": "int",
+    "description": "同一人冷却时间（秒）",
+    "default": 30,
+    "hint": "反查引擎有免费额度，刷爆了大家都不能用。0 = 不限制。"
+  },
+  "per_user_day": {
+    "type": "int",
+    "description": "单人每日次数",
+    "default": 20,
+    "hint": "0 = 不限制。管理员不受此限制。"
+  },
+  "global_day": {
+    "type": "int",
+    "description": "全站每日次数",
+    "default": 100,
+    "hint": "0 = 不限制。"
+  },
+  "cache_days": {
+    "type": "int",
+    "description": "结果缓存天数",
+    "default": 30,
+    "hint": "按图片内容哈希缓存，同一张图再查直接给上次结果，不扣次数。0 = 不缓存。"
+  },
+  "notify_start": {
+    "type": "bool",
+    "description": "开始查询时先回一句",
+    "default": true
+  },
+  "send_on_miss": {
+    "type": "bool",
+    "description": "没查到时也回复",
+    "default": true,
+    "hint": "关掉的话，没查到账号就完全不出声。"
+  },
+  "show_engine_detail": {
+    "type": "bool",
+    "description": "回话里附上引擎与失败原因",
+    "default": true
+  },
+  "found_image": {
+    "type": "string",
+    "description": "命中时附带的图片（路径或网址）",
+    "default": "",
+    "hint": "留空只发文字。相对路径相对插件目录。"
+  },
+  "max_image_mb": {
+    "type": "int",
+    "description": "图片大小上限（MB）",
+    "default": 20
+  },
+  "max_concurrent": {
+    "type": "int",
+    "description": "同时进行的反查数",
+    "default": 1,
+    "hint": "Lens 会开浏览器，并发太高容易互相拖死。"
+  },
+  "allow_url_query": {
+    "type": "bool",
+    "description": "允许用图片网址反查",
+    "default": true
+  },
+  "allow_local_path": {
+    "type": "bool",
+    "description": "允许用服务器本地路径反查",
+    "default": false,
+    "hint": "只建议机器人主人自己用。"
+  },
+  "group_whitelist": {
+    "type": "list",
+    "description": "群白名单（留空 = 所有群）",
+    "default": []
+  },
+  "group_blacklist": {
+    "type": "list",
+    "description": "群黑名单",
+    "default": []
+  }
+}
