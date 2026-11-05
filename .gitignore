@@ -1,4 +1,14 @@
 __pycache__/
 *.pyc
 .venv/
+
+# 运行时产物（写到 AstrBot 的 data/plugin_data/，此处兜底防止本地调试时落在插件目录）
 data/
+state.json
+*.log
+
+# 本地个人配置，绝不入库：代理地址、cookie、API key 都放这里
+.env
+.env.*
+*.local.json
+*.local.yaml

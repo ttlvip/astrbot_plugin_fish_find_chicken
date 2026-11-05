@@ -180,7 +180,7 @@ services:
     command: >
       --headless --no-sandbox --disable-gpu --disable-dev-shm-usage
       --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222
-      --proxy-server=http://192.168.1.10:7890
+      --proxy-server=http://<宿主机IP>:7890
     shm_size: 512m
     networks: [botnet]
 
@@ -238,14 +238,17 @@ AstrBot 镜像保持官方镜像（便于随时升级）→ 方案 B。
 | 拓扑 | 代理怎么写 | 注意 |
 |---|---|---|
 | `network_mode: host` | `http://127.0.0.1:7890` | 最简单；端口不再隔离 |
-| 桥接 + 宿主机局域网 IP | `http://192.168.1.10:7890` | Clash 需开「允许局域网连接」(allow-lan)，否则只监听回环 |
+| 桥接 + 宿主机局域网 IP | `http://<宿主机IP>:7890` | Clash 需开「允许局域网连接」(allow-lan)，否则只监听回环 |
 | 桥接 + `host.docker.internal` | `http://host.docker.internal:7890` | Linux 要加 `extra_hosts: ["host.docker.internal:host-gateway"]` |
+
+> `<宿主机IP>` 换成你自己的局域网地址（`192.168.x.x` / `10.x.x.x`），端口 `7890` 也按你的
+> 代理实际端口改。**不要**照抄表格里的占位符。
 
 写完在**容器内**验证（验证的是容器的网络，不是宿主机的）：
 
 ```bash
 docker exec -it astrbot curl -sS -o /dev/null -w "%{http_code}\n" --max-time 12 \
-  -x http://192.168.1.10:7890 https://www.google.com/
+  -x http://<宿主机IP>:7890 https://www.google.com/
 # 200 / 302 才算通；000 或超时就是不通
 ```
 
