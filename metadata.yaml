@@ -2,7 +2,7 @@ name: astrbot_plugin_fish_find_chicken
 display_name: 鱼鱼找鸡
 short_desc: 给一张图，反查这人是哪个 coser、账号在哪
 desc: 引用一张图发 /鱼鱼找鸡，用谷歌 Lens 反查原帖，认出是哪个 coser 并给出 X、微博、B站、Instagram、小红书等账号；同时并发 SauceNAO / trace.moe / IQDB 作为补充。纯 Python 实现（自带 CDP 浏览器驱动，不依赖 Node），支持复用 AstrBot 全局 http_proxy 访问谷歌。
-version: 1.1.0
+version: 0.0.1
 author: ttlvip
 repo: "https://github.com/ttlvip/astrbot_plugin_fish_find_chicken"
 astrbot_version: ">=4.5"

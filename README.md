@@ -5,6 +5,9 @@
 > **一句话原理**：把图交给谷歌 Lens 反查原帖，从结果里抽社交媒体账号（X / 微博 / B站 / Instagram / 小红书），
 > 再用 SauceNAO / trace.moe / IQDB 补充动漫图和动画截图的场景。不调用任何大模型，零 token。
 
+> **来源说明**：「鱼鱼找鸡」的原作者是 **小鲸鱼**（v1.0.0，Node.js 实现，MIT 许可）。
+> 本插件是它的纯 Python 重写，遵循同一许可证并保留原版权声明，详见[致谢与许可](#十一致谢与许可)。
+
 ---
 
 ## 一、它到底怎么工作的
@@ -366,8 +369,22 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 
 ## 十一、致谢与许可
 
-* 业务规则与文案来自原项目 **鱼鱼找鸡 v1.0.0**（Node 实现），本插件是它的纯 Python 重写：
-  「账号抽取只看 URL 证据」「名字共识」「三种没查到的区分」等都是原项目在真机上踩出来的经验。
+**原项目作者**
+
+* 「鱼鱼找鸡」由 **小鲸鱼** 创作（v1.0.0，Node.js 实现，MIT 许可）。
+  本插件的业务规则与文案均来自该项目：「账号抽取只看 URL 证据」「名字共识」「三种没查到的区分」
+  等都是原作者在真机上踩出来的经验，这里只是用 Python 重写了一遍。
+* 原项目的 MIT 版权声明已完整保留在 [LICENSE](LICENSE)（`Copyright (c) 2026 小鲸鱼`），
+  按 MIT 协议要求随代码一并分发。
+
+**其他参考**
+
 * 架构参考了 [`astrbot_plugin_coser_image_search_rimielabot`](https://github.com/RimieLab/astrbot_plugin_coser_image_search_rimielabot)
   的「用 CDP 驱动本机 Chrome/Edge」思路（本实现自带极简 CDP 客户端，仅依赖 aiohttp）。
-* 许可证见 [LICENSE](LICENSE)。
+* 反查能力来自 [Google Lens](https://lens.google.com/)、[SauceNAO](https://saucenao.com/)、
+  [trace.moe](https://trace.moe/)、[IQDB](https://iqdb.org/) 的公开接口，在此一并致谢。
+
+**许可**
+
+* 本项目采用 MIT 许可，全文见 [LICENSE](LICENSE)。
+
