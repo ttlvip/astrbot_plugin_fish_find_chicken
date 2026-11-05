@@ -47,7 +47,7 @@
 
 ```bash
 cd AstrBot/data/plugins
-git clone <本仓库>        # 或直接把目录拷进去
+git clone https://github.com/ttlvip/astrbot_plugin_fish_find_chicken.git
 ```
 
 然后在 WebUI「插件」页重载插件。日志里应当看到：
