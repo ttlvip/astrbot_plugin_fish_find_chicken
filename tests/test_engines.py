@@ -119,8 +119,82 @@ class ReplyTest(unittest.TestCase):
         self.assertIn("鱼鱼找鸡结果", text)
         self.assertIn("🌐 平台：Twitter", text)
         self.assertIn("👤 名字：阿薰kaOri", text)
-        self.assertIn("🆔 账号：@izayoill · https://x.com/izayoill", text)
+        # 主页单独一行：它和「最相关」是两种用途，不能混在账号那一行里
+        self.assertIn("🆔 账号：@izayoill", text)
+        self.assertIn("🔗 主页：https://x.com/izayoill", text)
         self.assertLessEqual(len(text), 900)
+
+    def test_most_relevant_link_is_reported(self):
+        """光有主页不够：要额外给出「内容最接近这张图」的那条具体页面。"""
+        accounts = [
+            {
+                "platform": "twitter",
+                "handle": "@izayoill",
+                "url": "https://x.com/izayoill",
+                "profileUrl": "https://x.com/izayoill",
+                "matchUrl": "https://x.com/izayoill/status/1234567890",
+                "matchTitle": "阿薰kaOri on X",
+                "authorName": "阿薰kaOri",
+                "confidence": "direct",
+                "evidence": {"engine": "lens", "similarity": None, "sourceUrl": ""},
+            }
+        ]
+        text = format_reply(accounts=accounts, engines_used=["lens"])
+        self.assertIn("🔗 主页：https://x.com/izayoill", text)
+        self.assertIn("🎯 最相关：https://x.com/izayoill/status/1234567890", text)
+        # 两个字段的用途要说清楚，否则用户不知道该点哪条
+        self.assertIn("主页 = 这个人的账号页", text)
+
+    def test_no_specific_page_says_so(self):
+        accounts = [
+            {
+                "platform": "twitter",
+                "handle": "@izayoill",
+                "url": "https://x.com/izayoill",
+                "matchUrl": "",
+                "authorName": "阿薰kaOri",
+                "confidence": "direct",
+                "evidence": {"engine": "lens", "similarity": None, "sourceUrl": ""},
+            }
+        ]
+        text = format_reply(accounts=accounts, engines_used=["lens"])
+        self.assertNotIn("🎯 最相关", text)
+        self.assertIn("只翻到主页", text)
+
+    def test_legacy_account_uses_evidence_link(self):
+        """没说 matchUrl 的老结构：evidence 里的具体页面仍要顶上来，主页则不能重复报。"""
+        post = "https://x.com/izayoill/status/999"
+        text = format_reply(
+            accounts=[
+                {
+                    "platform": "twitter",
+                    "handle": "@izayoill",
+                    "url": "https://x.com/izayoill",
+                    "authorName": "",
+                    "confidence": "direct",
+                    "evidence": {"engine": "lens", "similarity": None, "sourceUrl": post},
+                }
+            ]
+        )
+        self.assertIn(f"🎯 最相关：{post}", text)
+
+        profile_only = format_reply(
+            accounts=[
+                {
+                    "platform": "twitter",
+                    "handle": "@izayoill",
+                    "url": "https://x.com/izayoill",
+                    "authorName": "",
+                    "confidence": "direct",
+                    "evidence": {
+                        "engine": "lens",
+                        "similarity": None,
+                        "sourceUrl": "https://x.com/izayoill/",
+                    },
+                }
+            ]
+        )
+        self.assertNotIn("🎯 最相关", profile_only)
 
     def test_weak_marked(self):
         accounts = [

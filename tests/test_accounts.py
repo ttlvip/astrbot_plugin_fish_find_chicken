@@ -232,5 +232,91 @@ class ExtractAccountsTest(unittest.TestCase):
         self.assertEqual(normalize_person_name("阿薰 kaOri·"), normalize_person_name("阿薰KAORI"))
 
 
+class MatchLinkTest(unittest.TestCase):
+    """账号除了主页，还要带上「内容最接近原图」的那条具体链接。"""
+
+    def test_twitter_post_link_is_kept_beside_profile(self):
+        candidates = [
+            {
+                "engine": "lens",
+                "title": "X阿薰kaOri(@izayoill) / X",
+                "sourceUrl": "https://x.com/izayoill",
+                "links": ["https://x.com/izayoill"],
+            },
+            {
+                "engine": "lens",
+                "title": "阿薰kaOri on X: 新作",
+                "sourceUrl": "https://x.com/izayoill/status/1234567890?s=20&t=abc",
+                "links": ["https://x.com/izayoill/status/1234567890?s=20&t=abc"],
+            },
+        ]
+        accounts = extract_accounts(candidates)
+        self.assertEqual(len(accounts), 1)
+        account = accounts[0]
+        self.assertEqual(account["url"], "https://x.com/izayoill")          # 主页
+        self.assertEqual(account["profileUrl"], "https://x.com/izayoill")
+        # 分享参数要清掉，否则一串 ?s=20&t=… 看着就不知道是哪条
+        self.assertEqual(account["matchUrl"], "https://x.com/izayoill/status/1234567890")
+        self.assertEqual(account["matchHost"], "x.com")
+        self.assertEqual(account["matchUrls"][0]["url"], account["matchUrl"])
+
+    def test_profile_only_leaves_match_empty(self):
+        """只有主页时别拿主页凑数，否则等于把同一个链接报两遍。"""
+        candidates = [
+            {"engine": "lens", "title": "X阿薰kaOri(@izayoill) / X", "sourceUrl": "https://x.com/izayoill",
+             "links": ["https://x.com/izayoill"]},
+        ]
+        account = extract_accounts(candidates)[0]
+        self.assertEqual(account["matchUrl"], "")
+        self.assertEqual(account["matchUrls"], [])
+
+    def test_tab_page_is_not_a_post(self):
+        """x.com/<id>/media 是主页上的 tab，不是某条推文。"""
+        candidates = [
+            {"engine": "lens", "title": "X阿薰kaOri(@izayoill) / X", "sourceUrl": "https://x.com/izayoill",
+             "links": ["https://x.com/izayoill"]},
+            {"engine": "lens", "title": "阿薰kaOri media", "sourceUrl": "https://x.com/izayoill/media",
+             "links": ["https://x.com/izayoill/media"]},
+        ]
+        account = extract_accounts(candidates)[0]
+        self.assertEqual(account["matchUrl"], "")
+
+    def test_weibo_post_link(self):
+        candidates = [
+            {"engine": "lens", "title": "阿薰kaOri", "sourceUrl": "https://weibo.com/u/1234567890",
+             "links": ["https://weibo.com/u/1234567890"]},
+            {"engine": "lens", "title": "阿薰kaOri 的新微博", "sourceUrl": "https://weibo.com/1234567890/Nabcdefg",
+             "links": ["https://weibo.com/1234567890/Nabcdefg"]},
+        ]
+        account = extract_accounts(candidates)[0]
+        self.assertEqual(account["url"], "https://weibo.com/u/1234567890")
+        self.assertEqual(account["matchUrl"], "https://weibo.com/1234567890/Nabcdefg")
+
+    def test_pixiv_artwork_preferred_over_member_page(self):
+        candidates = [
+            {
+                "engine": "saucenao",
+                "title": "とある絵",
+                "sourceUrl": "https://www.pixiv.net/artworks/1",
+                "authorUrl": "https://www.pixiv.net/users/999",
+                "similarity": 0.95,
+                "links": ["https://www.pixiv.net/artworks/1", "https://www.pixiv.net/users/999"],
+            }
+        ]
+        account = extract_accounts(candidates)[0]
+        self.assertEqual(account["url"], "https://www.pixiv.net/users/999")
+        self.assertEqual(account["matchUrl"], "https://www.pixiv.net/artworks/1")
+
+    def test_other_peoples_post_is_not_attached(self):
+        """同一条结果卡片里混着别人的链接时，不能挂到当前账号名下。"""
+        candidates = [
+            {"engine": "lens", "title": "X阿薰kaOri(@izayoill) / X", "sourceUrl": "https://x.com/izayoill",
+             "links": ["https://x.com/izayoill", "https://x.com/someone_else/status/42"]},
+        ]
+        account = extract_accounts(candidates, strict_names=False)[0]
+        self.assertEqual(account["handle"], "@izayoill")
+        self.assertNotIn("someone_else", account["matchUrl"])
+
+
 if __name__ == "__main__":
     unittest.main()

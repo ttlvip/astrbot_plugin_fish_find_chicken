@@ -3,7 +3,9 @@
 整套判断来自原项目（鱼鱼找鸡 v1.0.0）实测踩出来的经验，几条铁律不要随手改：
 
 1. **只认 URL 证据**。没有链接的 handle 一律不写，宁可少报也不猜。
-2. **收敛到主页**。命中的常是某条推文（/status/…），但人问的是「账号」。
+2. **收敛到主页，但不丢掉原帖**。命中的常是某条推文（/status/…），人问的是「账号」，
+   所以 `url` 一律归一成主页；同时把「最接近原图的那条具体页面」记在 `matchUrl` 里
+   —— 只有主页的话用户还得自己在时间线上翻，等于没给到原始内容。
 3. **同一条原帖只算一个人**。weibo.com/n/昵称 与 weibo.com/u/数字uid 是同一个人。
 4. **名字对不上主轴就不报**。同一角色常有好几个 coser 各拍一版，Lens 会把别人的原帖
    一起带回来；判断「谁是这张图的人」看某个名字是否在多条结果标题里反复出现。
@@ -14,7 +16,7 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote
 
-from .textutil import strip_tags, trim_text
+from .textutil import host_of, strip_tags, strip_tracking, trim_text
 
 # ── 平台规则 ──────────────────────────────────────────────────────────────
 # 命中的常常是某条推文（/status/…），但人问的是「账号」，所以一律收敛到主页地址。
@@ -549,7 +551,170 @@ def extract_accounts(candidates, max_accounts: int = 3, strict_names: bool = Tru
         return (_rank(account), -sim, PLATFORM_WEIGHT.get(account["platform"], 9))
 
     kept = sorted(kept, key=sort_key)
-    return kept[: max(1, int(max_accounts or 3))]
+    kept = kept[: max(1, int(max_accounts or 3))]
+    # 最后再挂「最相关的那条具体链接」：抽账号时一律收敛到主页，但用户真正想点开
+    # 的是这条图对应的推文/作品页，缺了它回话里就只剩一个主页地址，等于没给原始内容。
+    attach_match_links(kept, items, consensus_name=str(consensus.get("name") or ""))
+    return kept
+
+
+# ── 「最相关的那条具体链接」 ───────────────────────────────────────────────
+# 一条链接如果既不是主页、也不是主页上的功能页（/media、/followers…），就认为它指向
+# 某个具体内容页（推文 / 微博正文 / pixiv 作品 / 小红书笔记）。
+_TAB_PATH_RE = re.compile(
+    r"/(?:media|followers|following|likes|liked|with_replies|replies|tagged|search|about)$",
+    re.I,
+)
+
+
+def _url_key(url) -> str:
+    """比较两条链接是不是同一个页面：去掉 query / fragment / 尾部斜杠。"""
+    text = re.sub(r"[?#].*$", "", str(url if url is not None else "").strip())
+    return text.rstrip("/").lower()
+
+
+def is_specific_page(url, profile_url) -> bool:
+    """这条链接是不是「比主页更具体」的内容页。
+
+    只用来判断「值不值得单独报一条」，所以宁可保守：主页本身、主页上的 tab 页
+    （x.com/<id>/media 这种）不算；其余同一个号名下的链接都算。
+    """
+    key = _url_key(url)
+    if not key:
+        return False
+    if profile_url and key == _url_key(profile_url):
+        return False
+    return not _TAB_PATH_RE.search(key)
+
+
+def _linked_handles(url) -> set[tuple[str, str]]:
+    """一条链接可能属于哪个号：普通形态走 match_platform，B站图文页再从 mid 里挖。"""
+    out: set[tuple[str, str]] = set()
+    hit = match_platform(url)
+    if hit:
+        out.add((hit["platform"], str(hit.get("handleKey") or "").lower()))
+    bili = BILIBILI_AUTHOR_RE.search(str(url if url is not None else ""))
+    if bili:
+        out.add(("bilibili", bili.group(1)))
+    return out
+
+
+def _link_score(entry: dict, url: str, consensus: str, evidence_url: str) -> float:
+    """给候选链接打分：越像「这张图的出处」分越高。
+
+    依次看：是不是这条账号的直接证据 → 是不是原帖（非「别人的回帖」）
+    → 引擎给的相似度 → 标题里有没有出现主轴名字 → 结果页里的先后顺序。
+    """
+    score = 0.0
+    if evidence_url and url == evidence_url:
+        score += 3.0
+    score += -2.0 if entry["weak"] else 2.0
+    similarity = entry["similarity"]
+    if isinstance(similarity, (int, float)) and not isinstance(similarity, bool):
+        score += float(similarity) * 2.0
+    if consensus and consensus in normalize_person_name(f"{entry['title']} {url}"):
+        score += 2.0
+    if entry["title"]:
+        score += 0.5
+    # 同分时保留引擎给出的相关性顺序（Lens 的卡片本身就是按相关性排的）
+    return score - float(entry["index"]) * 0.05
+
+
+def attach_match_links(accounts, candidates, consensus_name: str = "") -> None:
+    """给每条账号挂上「与图片内容最相关的那条具体链接」（原地修改）。
+
+    回话里的两个链接字段，用途是分开的：
+
+    * `url` / `profileUrl` —— 主页，看这个人的全部作品、判断是不是同一个人；
+    * `matchUrl` —— 内容最接近原图的那条具体页面（推文 / 微博正文 / 作品页 / 笔记），
+      用户点开就能直接核对「这张图是不是他发的」。
+
+    找不到比主页更具体的页面时，`matchUrl` 留空（不要拿主页凑数，那等于把主页报两遍）。
+    另外给出 `matchUrls`（最多 3 条，按相关性排序）备查。
+    """
+    consensus = normalize_person_name(consensus_name)
+
+    pool: list[dict] = []
+    for index, candidate in enumerate(list(candidates or [])):
+        urls: list[str] = []
+        for value in (
+            candidate.get("authorUrl"),
+            candidate.get("sourceUrl"),
+            candidate.get("url"),
+            *(candidate.get("links") or []),
+        ):
+            if value:
+                urls.append(str(value))
+        # 标题/摘要里的完整链接也算证据（SauceNAO 的作者行有时只出现在文字里）
+        for text in (candidate.get("title"), candidate.get("snippet")):
+            urls.extend(_URL_IN_TEXT.findall(str(text if text is not None else "")))
+
+        deduped: list[str] = []
+        for url in urls:
+            if url.startswith("http") and url not in deduped:
+                deduped.append(url)
+        if not deduped:
+            continue
+        handles: set[tuple[str, str]] = set()
+        for url in deduped:
+            handles |= _linked_handles(url)
+        pool.append(
+            {
+                "urls": deduped,
+                "handles": handles,
+                "title": trim_text(candidate.get("title") or "", 60),
+                "similarity": candidate.get("similarity"),
+                "weak": bool(candidate.get("weak")),
+                "index": index,
+            }
+        )
+
+    for account in accounts or []:
+        profile = str(account.get("url") or "").strip()
+        own = {
+            (
+                str(account.get("platform") or ""),
+                str(account.get("handle") or "").lstrip("@").lower(),
+            )
+        }
+        evidence_url = str((account.get("evidence") or {}).get("sourceUrl") or "")
+
+        best_by_key: dict[str, tuple[float, str, dict]] = {}
+        for entry in pool:
+            # 这张卡片是不是在讲这个号：要么卡里带着同一个 handle，要么它就是这条账号的证据
+            if not (entry["handles"] & own or (evidence_url and evidence_url in entry["urls"])):
+                continue
+            for url in entry["urls"]:
+                if not is_specific_page(url, profile):
+                    continue
+                linked = _linked_handles(url)
+                if linked and not (linked & own):
+                    continue  # 同一张卡片里混进来的别人的号，别当成本人的原帖
+                if not linked and host_of(url) != host_of(profile):
+                    continue  # 既没写号、又不是同一个站，认不出来
+                key = _url_key(url)
+                score = _link_score(entry, url, consensus, evidence_url)
+                if key in best_by_key and best_by_key[key][0] >= score:
+                    continue
+                best_by_key[key] = (score, url, entry)
+
+        ranked = sorted(best_by_key.values(), key=lambda row: -row[0])
+        account["profileUrl"] = profile
+        if not ranked:
+            account["matchUrl"] = ""
+            account["matchTitle"] = ""
+            account["matchHost"] = ""
+            account["matchUrls"] = []
+            continue
+        _score, best_url, best_entry = ranked[0]
+        account["matchUrl"] = strip_tracking(best_url)
+        account["matchTitle"] = best_entry["title"]
+        account["matchHost"] = host_of(best_url)
+        account["matchUrls"] = [
+            {"url": strip_tracking(url), "title": entry["title"], "host": host_of(url)}
+            for _s, url, entry in ranked[:3]
+        ]
+
 
 
 def account_name_of(account: dict, candidates=None) -> str:

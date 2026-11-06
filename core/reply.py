@@ -1,6 +1,12 @@
 """回话排版：把抽出来的账号变成一条能直接发群里的消息。
 
-版式是固定的（`🎯 鱼鱼找鸡结果 / 🌐 平台 / 👤 名字 / 🆔 账号`），改文案前请同步 README。
+版式是固定的，改文案前请同步 README：
+
+    🎯 鱼鱼找鸡结果
+    🌐 平台 / 👤 名字 / 🆔 账号
+    🔗 主页     —— 这个人的账号页（看全部作品、确认是不是同一个人）
+    🎯 最相关   —— 内容最接近这张图的那条具体页面（推文 / 作品页 / 笔记）
+
 「没查到」的三种原因要分开说，否则用户分不清是引擎没工作、还是翻到了但对不上人。
 """
 
@@ -12,12 +18,54 @@ from .accounts import (
     ARTWORK_PLATFORMS,
     account_name_of,
     is_social_host,
+    is_specific_page,
     display_handle,
     normalize_person_name,
     platform_label,
 )
 from .engines import engine_labels
 from .textutil import host_of, trim_text
+
+# 一条回话最多这么长：三个号的版式约 500 字，留足余量给链接和备注。
+# 超长时按行截断（见 `_fit`）—— 从链接中间切会让链接彻底失效。
+MAX_REPLY_CHARS = 1500
+
+# 两个链接字段的用途只解释一次（每个号都写一遍太吵）
+LINK_FOOTER = (
+    "· 主页 = 这个人的账号页；最相关 = 内容最接近这张图的具体页面"
+    "（那条推文 / 作品页 / 笔记），要核图先点这条"
+)
+NO_MATCH_HINT = "· 这次只翻到主页，没找到更具体的那条原帖（推文/作品页），点主页自己翻一下"
+
+
+def _fit(text: str, limit: int = MAX_REPLY_CHARS) -> str:
+    """超长时按行截断，别把链接切一半。"""
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 12]
+    newline = cut.rfind("\n")
+    if newline >= limit // 2:
+        cut = cut[:newline]
+    return cut + "\n…（后面省略）"
+
+
+def _match_link(account: dict) -> tuple[str, str]:
+    """取「最相关链接」和它的标题。
+
+    优先用账号上算好的 `matchUrl`；手工构造/旧数据没有这个字段时，退回
+    `evidence.sourceUrl` —— 但只有它确实指向某个具体页面（不是主页）才算数，
+    否则等于把主页重复报一遍。
+    """
+    url = str(account.get("matchUrl") or "").strip()
+    if url:
+        return url, str(account.get("matchTitle") or "").strip()
+    if "matchUrl" in account:
+        return "", ""
+    profile = str(account.get("url") or "").strip()
+    evidence = str((account.get("evidence") or {}).get("sourceUrl") or "").strip()
+    if evidence.startswith("http") and is_specific_page(evidence, profile):
+        return evidence, ""
+    return "", ""
 
 
 def _has_social_source(candidates) -> bool:
@@ -156,6 +204,7 @@ def format_reply(
 
     if accounts:
         blocks = []
+        has_match = False
         for account in accounts:
             url = str(account.get("url") or "").strip()
             guess = ""
@@ -163,19 +212,28 @@ def format_reply(
                 guess = "（推断，未核实）"
             elif account.get("confidence") == "weak":
                 guess = "（相似图，未核实）"
-            handle = display_handle(account) + (f" · {url}" if url else "")
+            handle = display_handle(account)
             # 推特昵称经常带一长串后缀（`月城りあ🌙🍼10/11(日)コスROM▹▸C-14`），抄全了没法看
             name = trim_text(account_name_of(account, candidates), 32)
-            blocks.append(
-                "\n".join(
-                    [
-                        f"🌐 平台：{platform_label(account.get('platform'))}",
-                        f"👤 名字：{name}",
-                        f"🆔 账号：{handle}{guess}",
-                    ]
-                )
-            )
+            block = [
+                f"🌐 平台：{platform_label(account.get('platform'))}",
+                f"👤 名字：{name}",
+                f"🆔 账号：{handle}{guess}",
+            ]
+            # 主页和「最相关」分两行写：一个用来认人，一个用来核图，混在一行会分不清哪个是哪个
+            if url:
+                block.append(f"🔗 主页：{url}")
+            match_url, match_title = _match_link(account)
+            if match_url:
+                has_match = True
+                line = f"🎯 最相关：{match_url}"
+                if match_title:
+                    line += f"｜{trim_text(match_title, 28)}"
+                block.append(line)
+            blocks.append("\n".join(block))
+
         text = "\n".join([HEAD + ("（缓存）" if cached else ""), "", "\n\n".join(blocks)])
+        text += "\n\n" + (LINK_FOOTER if has_match else NO_MATCH_HINT)
         # 只有画作平台的结果时，得说清楚这不是 coser 本人的号
         if note:
             text += f"\n\n· {note}"
@@ -184,9 +242,7 @@ def format_reply(
                 "\n\n· Pixiv 是画作平台（画师的作品页），不是 coser 本人的账号；"
                 "真人号一般在推特"
             )
-        if len(text) > 900:
-            text = text[:897] + "…"
-        return text
+        return _fit(text)
 
     tried = " / ".join(engine_labels(engines_used)) if engines_used else ""
     # 「空结果」不是故障：引擎正常工作、只是没匹配到。把它写进「没出结果」里
@@ -248,6 +304,5 @@ def format_reply(
                 "所以抽不出账号；换成未压缩的原图可能有用。"
             )
     text = "\n".join(lines)
-    if len(text) > 900:
-        text = text[:897] + "…"
-    return text
+    return _fit(text)
+

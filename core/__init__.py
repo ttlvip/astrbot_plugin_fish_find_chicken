@@ -4,7 +4,18 @@
 
     result = await search_image(data, "image/jpeg", settings=settings, store=store)
     result["text"]      # 直接能发群里的文案
-    result["accounts"]  # 结构化账号（[{platform, handle, url, authorName, confidence, evidence}]）
+    result["accounts"]  # 结构化账号（见下）
+
+每条账号的字段：
+
+    platform / handle / authorName / confidence   # 是谁、在哪、可信度
+    url / profileUrl                              # 主页链接（看全部作品、认人）
+    matchUrl / matchTitle / matchHost             # 与图片内容最相关的那条具体页面
+                                                  # （推文 / 微博正文 / 作品页 / 笔记）
+    matchUrls                                     # 同上，按相关性排的前 3 条，备查
+    evidence                                      # 引擎 / 相似度 / 命中的原始 sourceUrl
+
+`matchUrl` 为空 = 引擎只翻到主页，没有比主页更具体的内容页；这时候不要拿主页凑数。
 
 设计上的几条底线：
 
@@ -37,7 +48,8 @@ from .state import StateStore, day_key
 
 # 缓存版本号：改了引擎选择/解析逻辑就加一，让老缓存自动失效，
 # 否则同一张图会一直吃旧结果，看起来「改了跟没改一样」。
-CACHE_VERSION = 2
+# v3：账号新增 matchUrl（最相关原帖链接），v2 的缓存里没有这个字段。
+CACHE_VERSION = 3
 
 __all__ = [
     "ARTWORK_PLATFORMS",
