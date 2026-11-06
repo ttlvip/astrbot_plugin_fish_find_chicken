@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -165,6 +166,43 @@ class StateTest(unittest.TestCase):
         # 2026-01-01 00:30 北京时间 = 2025-12-31 16:30 UTC
         ts = 1767227400
         self.assertEqual(day_key(ts), "2026-01-01")
+
+
+class LoggingRuleTest(unittest.TestCase):
+    """审查硬性规定：日志必须且只能 `from astrbot.api import logger`。
+
+    内置 logging 会生成绕过 AstrBot 日志体系的独立 logger（市场审核直接拒），
+    所以这里做成回归测试 —— 以后谁再写 `import logging` 会当场挂掉。
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_no_builtin_logging_anywhere(self):
+        pattern = re.compile(r"^\s*(?:import logging\b|from logging import\b)", re.M)
+        offenders = [
+            str(path.relative_to(self.ROOT))
+            for path in self.ROOT.rglob("*.py")
+            if "__pycache__" not in path.parts
+            and pattern.search(path.read_text(encoding="utf-8"))
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_modules_take_logger_from_astrbot(self):
+        for name in ("core/browser.py", "core/lens.py"):
+            text = (self.ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("from astrbot.api import logger", text, name)
+            self.assertNotIn("getLogger", text, name)
+
+    def test_stub_logger_formats_braces(self):
+        """AstrBot 的 logger 是 loguru，占位符是 `{}`，`%s` 会被原样打出来。"""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import stub_astrbot
+
+        record = stub_astrbot._StubLogger()
+        record.threshold = 0
+        self.assertEqual(record._render("已注入 {} 个（{}）", (3, "x.com"), {}), "已注入 3 个（x.com）")
+        # 占位符写错也不能抛（日志不许打崩业务）
+        self.assertIn("已注入", record._render("已注入 %s", ("x",), {}))
 
 
 if __name__ == "__main__":

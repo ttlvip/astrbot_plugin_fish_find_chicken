@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import os
 import shutil
 import tempfile
@@ -32,8 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import aiohttp
-
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 __all__ = [
     "Browser",
@@ -337,7 +335,7 @@ class _CDP:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 网络抖动，按断开处理
-            logger.debug("CDP reader 异常退出：%s", exc)
+            logger.debug("CDP reader 异常退出：{}", exc)
         finally:
             # 连接断了必须把所有在等的 future 唤醒成异常，否则调用方会一直挂到超时。
             self._fail_pending("CDP 连接已断开")
@@ -350,7 +348,7 @@ class _CDP:
             try:
                 handler(data.get("params") or {})
             except Exception as exc:  # 回调出错不能把 reader 带崩
-                logger.debug("CDP 事件回调出错（%s）：%s", method, exc)
+                logger.debug("CDP 事件回调出错（{}）：{}", method, exc)
 
     def _fail_pending(self, reason: str) -> None:
         for fut in list(self._pending.values()):
@@ -444,7 +442,7 @@ async def apply_stealth(cdp: _CDP, *, reason: str = "") -> None:
     with contextlib.suppress(BrowserError):
         await cdp.js(STEALTH_JS, timeout=5)
     if reason:
-        logger.debug("已应用浏览器伪装（%s）", reason)
+        logger.debug("已应用浏览器伪装（{}）", reason)
 
 
 # ── 标签页 ──────────────────────────────────────────────────────────────────
@@ -698,7 +696,7 @@ class Browser:
                     if url:
                         return url, True
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            logger.debug("PUT /json/new 失败，准备退回 /json/list：%s", exc)
+            logger.debug("PUT /json/new 失败，准备退回 /json/list：{}", exc)
 
         pages = await self._page_targets()
         for item in reversed(pages):
@@ -765,7 +763,7 @@ class Browser:
                 continue
             if (resp.get("result") or {}).get("success"):
                 ok += 1
-        logger.info("已注入 %d 个 cookie（%s）", ok, domain)
+        logger.info("已注入 {} 个 cookie（{}）", ok, domain)
         return ok
 
     async def cookie_header(self, domain_suffix: str) -> str:
@@ -808,7 +806,7 @@ class Browser:
                 with contextlib.suppress(Exception):
                     await self._http.close()
                 self._http = None
-            logger.debug("已断开外部浏览器（%s）", self._base_url)
+            logger.debug("已断开外部浏览器（{}）", self._base_url)
             return
 
         # 先让浏览器体面退出。必须走 CDP 的 Browser.close：Windows 上 Edge 启动后会
@@ -832,14 +830,14 @@ class Browser:
         # 否则每重启一次就漏一个无头浏览器在后台吃内存。
         await asyncio.sleep(0.4)
         if await self._debug_port_alive():
-            logger.debug("Browser.close 没关干净，按端口强杀（port=%s）", self._port)
+            logger.debug("Browser.close 没关干净，按端口强杀（port={}）", self._port)
             await self._kill_port_owner()
 
         # 顺手清锁文件：下次启动不会被「profile 已被占用」挡住。
         _clean_profile_locks(self.profile_dir)
         if self._temp_profile:
             shutil.rmtree(self.profile_dir, ignore_errors=True)
-        logger.debug("浏览器已关闭（port=%s）", self._port)
+        logger.debug("浏览器已关闭（port={}）", self._port)
 
     async def _debug_port_alive(self) -> bool:
         try:
@@ -988,7 +986,7 @@ async def _launch(exe: str, proxy: str, profile_dir: str, headless: bool) -> Bro
     _clean_profile_locks(prof)
 
     args = _build_args(exe, proxy, prof, headless)
-    logger.debug("启动浏览器：%s", " ".join(args))
+    logger.debug("启动浏览器：{}", " ".join(args))
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -1054,7 +1052,7 @@ async def _launch(exe: str, proxy: str, profile_dir: str, headless: bool) -> Bro
         temp_profile=temp_profile,
     )
     browser._main_ws_url = ws_url
-    logger.info("无头浏览器就绪（pid=%s port=%s）", proc.pid, port)
+    logger.info("无头浏览器就绪（pid={} port={}）", proc.pid, port)
     return browser
 
 
@@ -1106,7 +1104,7 @@ async def _connect_remote(
     base, host, port = normalize_cdp_base(cdp_url)
     # 只有 https 才涉及证书；http 的 ssl 参数没有意义
     ssl_arg = False if (insecure and base.startswith("https://")) else None
-    logger.info("连接外部浏览器 CDP：%s%s", base, "（忽略证书校验）" if ssl_arg is False else "")
+    logger.info("连接外部浏览器 CDP：{}{}", base, "（忽略证书校验）" if ssl_arg is False else "")
 
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10), trust_env=False
@@ -1139,7 +1137,7 @@ async def _connect_remote(
                     data = await resp.json(content_type=None)
                     ws_url = str((data or {}).get("webSocketDebuggerUrl") or "")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            logger.debug("PUT /json/new 失败，退回已有标签页：%s", exc)
+            logger.debug("PUT /json/new 失败，退回已有标签页：{}", exc)
 
         owned = bool(ws_url)
         if not ws_url:
@@ -1186,7 +1184,7 @@ async def _connect_remote(
     browser._main_ws_url = ws_url
     browser.external_target_owned = owned
     logger.info(
-        "外部浏览器就绪（%s，%s）", base, (version or {}).get("Browser") or "版本未知"
+        "外部浏览器就绪（{}，{}）", base, (version or {}).get("Browser") or "版本未知"
     )
     return browser
 
@@ -1271,7 +1269,7 @@ async def get_browser(
             if _instance.alive and _instance_key == key:
                 return _instance
             reason = "已退出" if not _instance.alive else "代理/浏览器路径/有头模式变了"
-            logger.debug("重启浏览器（%s）", reason)
+            logger.debug("重启浏览器（{}）", reason)
             await _instance.close()
             _instance = None
         _instance = await _launch(exe, proxy, profile_dir, headless)

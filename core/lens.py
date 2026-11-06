@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import mimetypes
 import random
 import re
@@ -35,6 +34,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 import aiohttp
+from astrbot.api import logger
 
 from .browser import (
     USER_AGENT,
@@ -43,8 +43,6 @@ from .browser import (
     find_browser_exe,
     get_browser,
 )
-
-logger = logging.getLogger(__name__)
 
 __all__ = ["LensError", "browser_available", "lens_search"]
 
@@ -1003,7 +1001,7 @@ def _as_lens_error(exc: BrowserError) -> LensError:
 
 def _make_logger(on_log: Callable[[str], None] | None) -> Callable[[str], None]:
     def log(line: str) -> None:
-        logger.debug("lens: %s", line)
+        logger.debug("lens: {}", line)
         if on_log is None:
             return
         try:

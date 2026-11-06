@@ -8,12 +8,70 @@ AstrMessageEvent 的若干方法 / message_components。(Image, Plain, Reply)
 
 from __future__ import annotations
 
-import logging
+import os
 import sys
 import types
 from dataclasses import dataclass, field
 
-logger = logging.getLogger("astrbot_stub")
+_LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+
+
+class _StubLogger:
+    """模拟 AstrBot 的 logger（loguru）：占位符是 `{}` 而不是 `%s`。
+
+    插件里所有日志都必须走 `from astrbot.api import logger`，所以桩也得按 loguru 的
+    调用约定来 —— 否则 `logger.info("注入 {} 个", n)` 在测试里看不出问题，到真机上
+    才发现占位符对不上。
+
+    这里刻意**不用内置 logging**：审查规定插件内不得出现 `import logging`，
+    测试桩也算插件的一部分，不留这个口子。默认只把 WARNING 以上打到 stderr
+    （和 stdlib 默认行为一致），需要看 DEBUG 就设 `FISH_STUB_LOG=DEBUG`。
+    """
+
+    def __init__(self, name: str = "astrbot_stub"):
+        self.name = name
+        self.threshold = _LEVELS.get(
+            os.environ.get("FISH_STUB_LOG", "WARNING").upper(), _LEVELS["WARNING"]
+        )
+
+    @staticmethod
+    def _render(message, args, kwargs) -> str:
+        text = str(message)
+        if not args and not kwargs:
+            return text
+        try:
+            return text.format(*args, **kwargs)
+        except (IndexError, KeyError, ValueError):
+            # 日志绝不能把业务打崩；占位符写错了就把参数原样附在后面
+            return f"{text} {args if args else ''}".rstrip()
+
+    def _emit(self, level: str, message, args, kwargs) -> None:
+        if _LEVELS.get(level, 0) < self.threshold:
+            return
+        print(f"[{level}] {self._render(message, args, kwargs)}", file=sys.stderr)
+
+    def debug(self, message, *args, **kwargs):
+        self._emit("DEBUG", message, args, kwargs)
+
+    def info(self, message, *args, **kwargs):
+        self._emit("INFO", message, args, kwargs)
+
+    def warning(self, message, *args, **kwargs):
+        self._emit("WARNING", message, args, kwargs)
+
+    warn = warning
+
+    def error(self, message, *args, **kwargs):
+        self._emit("ERROR", message, args, kwargs)
+
+    def exception(self, message, *args, **kwargs):
+        self._emit("ERROR", message, args, kwargs)
+
+    def critical(self, message, *args, **kwargs):
+        self._emit("CRITICAL", message, args, kwargs)
+
+
+logger = _StubLogger()
 
 
 # ── message_components ───────────────────────────────────────────────────

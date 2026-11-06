@@ -11,6 +11,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# core.browser 直接 `from astrbot.api import logger`（审查要求：不许用内置 logging），
+# 所以离线跑单测前必须先把 AstrBot 桩装进 sys.modules。
+import stub_astrbot  # noqa: E402
+
+stub_astrbot.install()
 
 from core.browser import BrowserError, normalize_cdp_base  # noqa: E402
 from core.config import Settings  # noqa: E402

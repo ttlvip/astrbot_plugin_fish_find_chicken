@@ -306,6 +306,11 @@ astrbot_plugin_fish_find_chicken/
 
 状态文件在 `data/plugin_data/astrbot_plugin_fish_find_chicken/state.json`（不放在插件目录，避免更新时被覆盖）。
 
+**写代码时的一条硬性约定**：日志只能 `from astrbot.api import logger`，占位符用 `{}`
+（AstrBot 的 logger 是 loguru，`%s` 会被原样打出来）。**不许 `import logging`** ——
+内置 logging 会生成绕过 AstrBot 日志体系的独立 logger，插件市场上架审核会直接拒。
+`tests/test_core.py::LoggingRuleTest` 会把这条规则钉死，再写就挂测试。
+
 ## 八、用 SerpApi 代替本地浏览器（可选，能彻底避开人机验证）
 
 插件支持接 [SerpApi 的 Google Lens API](https://serpapi.com/google-lens-api)：由 SerpApi 用它自己的池子去查 Lens，
