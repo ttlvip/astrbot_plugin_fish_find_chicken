@@ -49,7 +49,11 @@ from .state import StateStore, day_key
 # 缓存版本号：改了引擎选择/解析逻辑就加一，让老缓存自动失效，
 # 否则同一张图会一直吃旧结果，看起来「改了跟没改一样」。
 # v3：账号新增 matchUrl（最相关原帖链接），v2 的缓存里没有这个字段。
-CACHE_VERSION = 3
+# v4：缓存键纳入引擎/严格筛选等配置；失败结果不再写入。
+CACHE_VERSION = 4
+
+# 这类失败说明这次查询不可靠，写进缓存会挡住后续重试（尤其是 Lens 验证码/超时）。
+_CACHE_BLOCKING_FAILURES = ("超时", "验证码", "人机", "限流", "429", "captcha", "timeout", "throttle")
 
 __all__ = [
     "ARTWORK_PLATFORMS",
@@ -80,8 +84,39 @@ __all__ = [
 ]
 
 
-def cache_key_for(content: bytes) -> str:
-    return f"{hashlib.sha256(content).hexdigest()}:{CACHE_VERSION}"
+def cache_key_for(content: bytes, settings: Settings | None = None) -> str:
+    """按图片内容 + 会影响结果的配置生成缓存键。
+
+    `/鱼鱼找鸡 全部` 会把 strict_consensus 设成 False，必须和严格筛选分开存，
+    否则命中旧缓存时「全部」等于没开。
+    """
+    digest = hashlib.sha256(content).hexdigest()
+    if settings is None:
+        return f"{digest}:{CACHE_VERSION}"
+    engines = ",".join(settings.engines)
+    channel = "serpapi" if settings.serpapi_ready else "browser"
+    conf = (
+        f"e={engines}|s={int(bool(settings.strict_consensus))}|"
+        f"m={settings.max_accounts}|c={channel}|r={settings.lens_max_resolve}"
+    )
+    return f"{digest}:{CACHE_VERSION}:{hashlib.sha256(conf.encode()).hexdigest()[:12]}"
+
+
+def _should_cache(result: dict) -> bool:
+    """只有可靠的成功结果才写缓存，避免把超时/验证码锁进 30 天。"""
+    engines_used = result.get("enginesUsed") or []
+    if not engines_used:
+        return False
+    failures = result.get("failures") or []
+    for item in failures:
+        reason = str(item.get("reason") or "").lower()
+        if any(token in reason for token in _CACHE_BLOCKING_FAILURES):
+            return False
+    candidates = result.get("candidates") or []
+    # 候选全空且有任意失败：多半是半残结果（比如补充引擎空跑、Lens 挂了），别缓存。
+    if not candidates and failures:
+        return False
+    return True
 
 
 async def search_image(
@@ -93,7 +128,7 @@ async def search_image(
     on_log=None,
 ) -> dict:
     """反查一张图，返回 candidates / accounts / text / 引擎与失败信息。"""
-    key = cache_key_for(content)
+    key = cache_key_for(content, settings)
     if store is not None:
         cached = store.cache_get(key, cache_days=settings.cache_days)
         if cached and cached.get("text"):
@@ -159,8 +194,7 @@ async def search_image(
         "failures": result["failures"],
         "cached": False,
     }
-    # 只在「确实查了」的时候写缓存：一个引擎都没跑通时缓存下去，
-    # 用户重试还会吃到同一个失败结果。
-    if store is not None and result["enginesUsed"]:
+    # 只缓存可靠的成功结果：半残/超时/验证码写进去会挡住用户重试。
+    if store is not None and _should_cache(payload):
         await store.cache_put(key, payload)
     return payload

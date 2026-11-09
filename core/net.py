@@ -262,6 +262,10 @@ def _describe_net_error(exc: Exception, url: str) -> str:
 
 
 # ── 图片下载 ──────────────────────────────────────────────────────────────
+_MAX_REDIRECTS = 5
+_CHUNK_SIZE = 64 * 1024
+
+
 async def download_image(
     url: str,
     *,
@@ -273,31 +277,77 @@ async def download_image(
     """下载一张图，返回 (bytes, mime)。
 
     `allow_private=False` 时会拒绝内网地址 —— 图片网址来自群里的陌生人，不能当扫描器用。
+    重定向必须手动跟随并每跳重检：aiohttp 默认 allow_redirects 会绕过首跳 SSRF 检查。
+    响应按块读，超过 max_bytes 立刻断开，避免对方先吐几百 MB 再报「图太大」。
     """
     target = str(url or "").strip()
     if not target.lower().startswith(("http://", "https://")):
         raise HttpError("图片地址必须是 http/https 网址")
-    if not allow_private:
-        await ensure_public_host(target)
 
-    result = await request(
-        "GET",
-        target,
-        proxy=proxy,
-        headers={"Accept": "image/*,*/*;q=0.8", "Referer": ""},
-        timeout=timeout,
-    )
-    if result.status != 200:
-        raise HttpError(f"下载图片失败 HTTP {result.status}")
-    ctype = (result.content_type or "").lower()
-    if ctype and not ctype.startswith("image/"):
-        raise HttpError(f"那个地址不是图片（{ctype}）")
-    data = result.body
-    if not data:
-        raise HttpError("图片是空的")
-    if len(data) > max_bytes:
-        raise HttpError(f"图太大了（{len(data) / 1048576:.1f}MB，上限 {max_bytes // 1048576}MB）")
-    return data, sniff_mime(data, ctype or "image/jpeg")
+    px = normalize_proxy(proxy)
+    headers = {"Accept": "image/*,*/*;q=0.8", "Referer": "", "User-Agent": DEFAULT_UA}
+    seen: set[str] = set()
+
+    try:
+        async with _session(headers=headers, timeout=timeout) as session:
+            for _ in range(_MAX_REDIRECTS + 1):
+                if target in seen:
+                    raise HttpError("图片下载重定向形成循环")
+                seen.add(target)
+                if not allow_private:
+                    await ensure_public_host(target)
+
+                async with session.request(
+                    "GET",
+                    target,
+                    proxy=px or None,
+                    allow_redirects=False,
+                ) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location") or ""
+                        if not location:
+                            raise HttpError(f"下载图片失败 HTTP {resp.status}（无 Location）")
+                        target = _absolute_url(str(resp.url), location)
+                        if not target.lower().startswith(("http://", "https://")):
+                            raise HttpError("图片重定向后不是 http/https 网址")
+                        continue
+
+                    if resp.status != 200:
+                        raise HttpError(f"下载图片失败 HTTP {resp.status}")
+                    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    if ctype and not ctype.startswith("image/"):
+                        raise HttpError(f"那个地址不是图片（{ctype}）")
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.content.iter_chunked(_CHUNK_SIZE):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise HttpError(
+                                f"图太大了（超过 {max_bytes // 1048576}MB）"
+                            )
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                    if not data:
+                        raise HttpError("图片是空的")
+                    return data, sniff_mime(data, ctype or "image/jpeg")
+
+            raise HttpError(f"图片下载重定向超过 {_MAX_REDIRECTS} 次")
+    except HttpError:
+        raise
+    except asyncio.TimeoutError as exc:
+        raise HttpError(f"请求超时（{int(timeout)} 秒）：{_brief(url)}", code="TIMEOUT") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HttpError(_describe_net_error(exc, url), code="NET") from exc
+
+
+def _absolute_url(base: str, location: str) -> str:
+    """把相对 Location 收成绝对 URL。"""
+    from urllib.parse import urljoin
+
+    return urljoin(base, location.strip())
 
 
 def sniff_mime(data: bytes, fallback: str = "image/jpeg") -> str:
@@ -361,11 +411,18 @@ async def ensure_public_host(url: str) -> None:
 
 
 def _ip_is_public(ip) -> bool:
-    return not (
-        ip.is_private
-        or ip.is_loopback
+    """只放行公网全局地址。
+
+    ``is_private`` 放不过 CGNAT（100.64.0.0/10），``is_global`` 会拦；
+    同时继续显式拒绝环回 / 链路本地 / 组播，避免个别 Python 版本对边界地址判断不一致。
+    """
+    if (
+        ip.is_loopback
         or ip.is_link_local
-        or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
-    )
+        or ip.is_reserved
+        or ip.is_private
+    ):
+        return False
+    return bool(getattr(ip, "is_global", True))

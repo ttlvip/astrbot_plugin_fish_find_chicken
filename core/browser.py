@@ -43,7 +43,9 @@ __all__ = [
     "find_browser_exe",
     "get_browser",
     "locale_for_country",
+    "normalize_cdp_base",
     "resolve_locale",
+    "rewrite_ws_url",
     "stealth_js",
 ]
 
@@ -693,6 +695,53 @@ class _CDP:
             await self._session.close()
 
 
+def _url_match_key(url: str) -> str:
+    """把 URL 收成可比较的键：忽略末尾斜杠和 fragment，只看 scheme/host/path/query。"""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text.rstrip("/")
+    path = parts.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return f"{parts.scheme}://{parts.netloc}{path}" + (f"?{parts.query}" if parts.query else "")
+
+
+def _urls_compatible(current: str, expect: str) -> bool:
+    """当前页是否已经进入本次导航的目标（允许 www 差异和 query 追加）。"""
+    if not expect:
+        return True
+    try:
+        cur = urlsplit(str(current or "").strip())
+        exp = urlsplit(str(expect or "").strip())
+    except ValueError:
+        return _url_match_key(current) == _url_match_key(expect)
+    if (cur.scheme or "http") != (exp.scheme or "http"):
+        # about:blank 等特殊 scheme 走精确比较
+        return _url_match_key(current) == _url_match_key(expect)
+    cur_host = (cur.hostname or "").lower().removeprefix("www.")
+    exp_host = (exp.hostname or "").lower().removeprefix("www.")
+    if not cur_host or cur_host != exp_host:
+        return False
+    cur_path = cur.path or "/"
+    exp_path = exp.path or "/"
+    if cur_path != "/" and cur_path.endswith("/"):
+        cur_path = cur_path.rstrip("/")
+    if exp_path != "/" and exp_path.endswith("/"):
+        exp_path = exp_path.rstrip("/")
+    return cur_path == exp_path or cur_path.startswith(exp_path + "/") or exp_path.startswith(cur_path + "/")
+
+
+def _brief_url(url: str, limit: int = 80) -> str:
+    text = str(url or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _short(obj: Any, limit: int = 160) -> str:
     """CDP 的错误体是嵌套 dict，直接丢给日志会刷屏，这里取一小段字符串。"""
     try:
@@ -848,6 +897,9 @@ class Browser:
         self.locale = locale or DEFAULT_LOCALE
         self._main_ws_url = ""
         self._closed = False
+        # 外部浏览器：这张主标签是不是我们自己 PUT /json/new 开的。
+        # 借用别人的标签时 close() 绝不能 Page.close。
+        self.external_target_owned = False
         # 主页面操作要串行：一次查询会连着做「导航 → 注入表单 → 选文件 → 提交」，
         # 两个查询同时跑会互相把页面导航走，结果两边都拿不到卡片。
         self.page_lock = asyncio.Lock()
@@ -893,7 +945,7 @@ class Browser:
         return await self._cdp.js(expression, await_promise=await_promise, timeout=timeout)
 
     async def navigate(self, url: str, *, timeout: float = 25) -> None:
-        """导航主页面并等文档加载完（轮询 readyState）。"""
+        """导航主页面并等文档加载完（轮询 readyState + 目标 URL）。"""
         if not self.alive:
             raise BrowserError("浏览器进程已经不在了")
         resp = await self._cdp.send("Page.navigate", {"url": url}, timeout=min(20.0, timeout))
@@ -902,25 +954,39 @@ class Browser:
         text = err or err_text
         if text and "ERR_ABORTED" not in text:
             raise BrowserError(f"页面打不开：{text}")
-        await self._wait_ready(timeout)
+        await self._wait_ready(timeout, expect_url=url)
 
-    async def _wait_ready(self, timeout: float) -> None:
-        """轮询到 DOM 可用（readyState 是 ``interactive`` 或 ``complete``）。
+    async def _wait_ready(self, timeout: float, *, expect_url: str = "") -> None:
+        """轮询到「已离开旧文档」且 DOM 可用。
+
+        只看 readyState 会踩坑：Page.navigate 返回时旧页面往往仍是 complete，
+        立刻往下抽卡片就会把上一张图的结果当成这一张。必须等到 location 进入目标
+        （或执行上下文被销毁过一次）才接受 readyState。
 
         为什么不等 complete：``complete`` 要等图片/字体/统计脚本全部下完，走代理时
         实测能多等 15 秒以上，而我们只需要 document.body 存在（好注入表单、读卡片）。
         """
         loop = asyncio.get_running_loop()
         end = loop.time() + max(1.0, timeout)
+        saw_unload = not expect_url  # 没给目标 URL 时保持老行为
         while loop.time() < end:
             try:
+                href = str(await self.eval("location.href", timeout=4) or "")
                 state = await self.eval("document.readyState", timeout=4)
             except BrowserError:
-                state = ""
-            if state in ("interactive", "complete"):
+                # 导航中执行上下文被销毁 = 旧文档已经卸了，下一拍再读。
+                saw_unload = True
+                await asyncio.sleep(0.15)
+                continue
+            on_target = _urls_compatible(href, expect_url) if expect_url else True
+            if on_target:
+                saw_unload = True
+            if saw_unload and state in ("interactive", "complete") and on_target:
                 return
             await asyncio.sleep(0.15)
-
+        raise BrowserError(
+            f"页面加载超时（仍未进入目标页：{_brief_url(expect_url) or '未知'}）"
+        )
     async def set_file_input(
         self, selector: str, files: list[str], *, timeout: float = 10.0
     ) -> None:
@@ -995,7 +1061,7 @@ class Browser:
                     data = await resp.json(content_type=None)
                     url = str((data or {}).get("webSocketDebuggerUrl") or "")
                     if url:
-                        return url, True
+                        return rewrite_ws_url(url, self._base_url), True
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             logger.debug(f"PUT /json/new 失败，准备退回 /json/list：{exc}")
 
@@ -1003,7 +1069,7 @@ class Browser:
         for item in reversed(pages):
             url = str(item.get("webSocketDebuggerUrl") or "")
             if url and url != self._main_ws_url:
-                return url, False
+                return rewrite_ws_url(url, self._base_url), False
         raise BrowserError("开不出新标签页（调试端口不认 /json/new）")
 
     async def _page_targets(self) -> list[dict[str, Any]]:
@@ -1027,19 +1093,25 @@ class Browser:
             self._http = aiohttp.ClientSession(trust_env=False, connector=connector)
         return self._http
 
-    async def set_cookies(self, raw: str, *, domain: str = ".google.com") -> int:
+    async def set_cookies(
+        self, raw: str, *, domain: str = ".google.com", strip_auth: bool = True
+    ) -> int:
         """把一串 `name=value; name2=value2` 注入浏览器会话。
 
         用途：用户在自己的浏览器里过过一次谷歌验证后，把 google.com 的 cookie 抄过来，
-        插件带着这套 cookie 查询就不会被当成陌生访客，验证码概率显著下降（登录态更明显）。
+        插件带着这套 cookie 查询就不会被当成陌生访客，验证码概率显著下降。
 
-        限制要说清楚：谷歌的反滥用 cookie 是和 IP 绑定的，所以必须在**同一个出口 IP**
-        下导出/使用；换了代理，这些 cookie 基本失效。
+        默认会丢掉登录态 cookie（SID / SSID / …）：Lens 带着 Google 账号搜本地上传的图时，
+        会出现「图片未与 xxx@gmail.com 关联，请切换账号」—— 反查不需要登录，只要
+        NID 这类访客/反滥用 cookie 即可。
+
+        限制：谷歌的反滥用 cookie 与出口 IP 绑定，换了代理基本失效。
         """
         text = (raw or "").strip()
         if not text:
             return 0
         ok = 0
+        skipped_auth = 0
         for chunk in text.split(";"):
             if "=" not in chunk:
                 continue
@@ -1047,6 +1119,9 @@ class Browser:
             name = name.strip()
             value = value.strip()
             if not name:
+                continue
+            if strip_auth and _is_google_auth_cookie(name):
+                skipped_auth += 1
                 continue
             try:
                 resp = await self._cdp.send(
@@ -1064,8 +1139,47 @@ class Browser:
                 continue
             if (resp.get("result") or {}).get("success"):
                 ok += 1
-        logger.info(f"已注入 {ok} 个 cookie（{domain}）")
+        if skipped_auth:
+            logger.info(
+                f"已注入 {ok} 个 cookie（{domain}），跳过 {skipped_auth} 个登录态 cookie"
+            )
+        else:
+            logger.info(f"已注入 {ok} 个 cookie（{domain}）")
         return ok
+
+    async def clear_google_login_cookies(self) -> int:
+        """清掉 profile 里的谷歌登录态，避免 Lens 提示「图片未与某账号关联」。
+
+        有头模式手动过验证、或以前注入过完整 Cookie 时，登录态会留在 browser_profile。
+        反查只需要访客会话，登录反而添乱。
+        """
+        try:
+            resp = await self._cdp.send("Storage.getCookies", timeout=8)
+        except BrowserError:
+            return 0
+        cookies = ((resp.get("result") or {}).get("cookies")) or []
+        removed = 0
+        for item in cookies:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            domain = str(item.get("domain") or "").lstrip(".").lower()
+            if not name or not _is_google_auth_cookie(name):
+                continue
+            if "google." not in domain and not domain.endswith("google.com"):
+                continue
+            params = {"name": name}
+            if item.get("url"):
+                params["url"] = item["url"]
+            else:
+                params["domain"] = item.get("domain") or ".google.com"
+                params["path"] = item.get("path") or "/"
+            with contextlib.suppress(BrowserError):
+                await self._cdp.send("Network.deleteCookies", params, timeout=5)
+                removed += 1
+        if removed:
+            logger.info(f"已清掉 {removed} 个谷歌登录态 cookie")
+        return removed
 
     async def cookie_header(self, domain_suffix: str) -> str:
         """把 profile 里属于某个域后缀的 cookie 拼成 Cookie 头。
@@ -1100,8 +1214,10 @@ class Browser:
         if self.external:
             # 外部浏览器不归我们管：只关掉自己开的那张标签页，然后断开连接。
             # 绝对不能发 Browser.close —— 那会把别人（或另一个容器）正在用的浏览器关掉。
-            with contextlib.suppress(Exception):
-                await self._cdp.send("Page.close", timeout=3)
+            # 借用已有标签时也不能 Page.close，否则会把别人正在看的页关掉。
+            if self.external_target_owned:
+                with contextlib.suppress(Exception):
+                    await self._cdp.send("Page.close", timeout=3)
             await self._cdp.close()
             if self._http is not None:
                 with contextlib.suppress(Exception):
@@ -1210,6 +1326,68 @@ def _is_headless_shell(exe: str) -> bool:
     return "headless_shell" in name or "headless-shell" in name
 
 
+# 登录态 cookie：带着它们去 Lens 上传本地图，谷歌会提示
+# 「您用于搜索的图片未与 xxx@gmail.com 关联」。反查不需要登录。
+_GOOGLE_AUTH_COOKIE_NAMES = frozenset(
+    {
+        "SID",
+        "HSID",
+        "SSID",
+        "APISID",
+        "SAPISID",
+        "LSID",
+        "ACCOUNT_CHOOSER",
+        "GAPS",
+        "GALX",
+        "SIDCC",
+    }
+)
+
+
+def _is_google_auth_cookie(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if text in _GOOGLE_AUTH_COOKIE_NAMES:
+        return True
+    # __Secure-1PSID / __Host-GAPS / SIDCC 等变体
+    upper = text.upper()
+    return (
+        upper.endswith("PSID")
+        or upper.endswith("PSIDTS")
+        or upper.endswith("PSIDCC")
+        or "SAPISID" in upper
+        or upper.startswith("__HOST-GAPS")
+        or upper.startswith("ACCOUNT_")
+    )
+
+
+def _running_as_root() -> bool:
+    if os.name == "nt":
+        return False
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return False
+    try:
+        return int(geteuid()) == 0
+    except OSError:
+        return False
+
+
+def _needs_chromium_sandbox_bypass() -> bool:
+    """只有 root / 明显的容器环境才需要 ``--no-sandbox``。
+
+    普通 Linux 桌面用户带着这个标记会弹出黄条：
+    「您使用的是不受支持的命令行标记: --no-sandbox」。
+    """
+    if os.name == "nt":
+        return False
+    if _running_as_root():
+        return True
+    # /.dockerenv 是 Docker 容器的常见信号；有它但非 root 时仍常需要关沙箱。
+    return Path("/.dockerenv").exists()
+
+
 def _build_args(
     exe: str,
     proxy: str,
@@ -1221,6 +1399,7 @@ def _build_args(
     args = [exe]
     if proxy:
         # 代理只能通过启动参数给，运行中改不了 → get_browser 换代理时必须重启浏览器。
+        # 日志里只打脱敏后的代理，避免把账号密码写进进程命令行以外的地方。
         args.append(f"--proxy-server={proxy}")
     if headless:
         # headless_shell 本来就是无头的，多传一个 --headless=new 在部分版本上会直接报错退出
@@ -1245,9 +1424,12 @@ def _build_args(
         args += [f"--lang={loc.language}", f"--accept-lang={loc.accept_language}"]
     args.append("about:blank")
     if os.name != "nt":
-        # Docker 里通常以 root 跑，Chromium 的沙箱在 root 下会直接退出码 1；
-        # /dev/shm 小也是容器里的经典坑。
-        args[-1:-1] = ["--no-sandbox", "--disable-dev-shm-usage"]
+        # 容器 /dev/shm 小是经典坑，关不掉沙箱时也建议带上。
+        extras = ["--disable-dev-shm-usage"]
+        if _needs_chromium_sandbox_bypass():
+            # root/Docker 下沙箱会直接让 Chromium 退出码 1；普通用户不要加，否则黄条警告。
+            extras.insert(0, "--no-sandbox")
+        args[-1:-1] = extras
     return args
 
 
@@ -1408,6 +1590,27 @@ def normalize_cdp_base(cdp_url: str) -> tuple[str, str, int]:
     return f"{scheme}://{host}:{port}", host, port
 
 
+def rewrite_ws_url(ws_url: str, http_base: str) -> str:
+    """把 Chrome 回报的 ws 地址改写到我们实际能连的 host/port。
+
+    跨容器时 /json/new 常返回 ``ws://127.0.0.1:9222/...``（Chrome 容器内的回环），
+    AstrBot 容器连过去必然失败。HTTP 探测用的是 ``http://chrome:9222``，
+    WebSocket 也必须改成同一个主机。
+    """
+    raw = str(ws_url or "").strip()
+    if not raw:
+        return ""
+    base, host, port = normalize_cdp_base(http_base)
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    ws_scheme = "wss" if base.startswith("https://") else "ws"
+    path = parts.path or ""
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{ws_scheme}://{host}:{port}{path}{query}"
+
+
 async def _connect_remote(
     cdp_url: str,
     *,
@@ -1481,6 +1684,8 @@ async def _connect_remote(
             ws_url = str(pages[0]["webSocketDebuggerUrl"])
             logger.debug("复用外部浏览器已有标签页（不是新建的）")
 
+        ws_url = rewrite_ws_url(ws_url, base)
+
     cdp = await _CDP.connect(ws_url, timeout=15, insecure=insecure)
     try:
         await cdp.send("Page.enable", timeout=10)
@@ -1492,6 +1697,10 @@ async def _connect_remote(
         # 时区覆盖走 CDP，对远端浏览器同样有效 —— Chrome 容器常常是 UTC，比 AstrBot 容器更明显。
         await apply_stealth(cdp, reason="外部浏览器", locale=locale)
     except Exception:
+        # 自己新建的 target 连不上 / 伪装失败时，别把空白标签留在远端浏览器里。
+        if owned:
+            with contextlib.suppress(Exception):
+                await cdp.send("Page.close", timeout=3)
         await cdp.close()
         raise
 
@@ -1520,19 +1729,25 @@ async def _connect_remote(
 _instance: Browser | None = None
 _instance_key: tuple[Any, ...] = ()
 # asyncio.Lock 在 3.10+ 是「首次使用时绑定事件循环」，插件被重载后循环会换一个，
-# 老 Lock 再 await 就会抛 "attached to a different loop"。按循环分开存最省事。
-_locks: dict[int, asyncio.Lock] = {}
+# 老 Lock 再 await 就会抛 "attached to a different loop"。用弱引用绑定当前 loop。
+_lock_holder: tuple[Any, asyncio.Lock] | None = None
 
 
 def _lock_for_current_loop() -> asyncio.Lock:
+    """拿到绑定在当前事件循环上的互斥锁。
+
+    不按 ``id(loop)`` 长期缓存：循环被回收后新循环可能复用同一个 id，
+    字典里仍是旧 Lock，之后 await 会一直 ``attached to a different loop``。
+    也不在有人持锁时 clear 整表 —— 那会造出第二把锁，两边同时 ``_launch``。
+    """
+    global _lock_holder
     loop = asyncio.get_running_loop()
-    key = id(loop)
-    lock = _locks.get(key)
-    if lock is None:
-        if len(_locks) > 4:  # 循环换得太频繁说明有别的 bug，别无限攒
-            _locks.clear()
-        lock = asyncio.Lock()
-        _locks[key] = lock
+    if _lock_holder is not None:
+        bound_loop, lock = _lock_holder
+        if bound_loop is loop:
+            return lock
+    lock = asyncio.Lock()
+    _lock_holder = (loop, lock)
     return lock
 
 
@@ -1595,13 +1810,15 @@ async def get_browser(
         )
     proxy = (proxy or "").strip()
     headless = bool(headless)
-    key = (proxy, exe, headless, loc_key)
+    # profile 必须进 key：换了目录还复用旧进程，cookie 仍是上一份。
+    profile_key = str(Path(profile_dir).expanduser()) if profile_dir else ""
+    key = (proxy, exe, headless, loc_key, profile_key)
 
     async with _lock_for_current_loop():
         if _instance is not None:
             if _instance.alive and _instance_key == key:
                 return _instance
-            reason = "已退出" if not _instance.alive else "代理/浏览器路径/有头模式/地区变了"
+            reason = "已退出" if not _instance.alive else "代理/浏览器路径/有头模式/地区/profile 变了"
             logger.debug(f"重启浏览器（{reason}）")
             await _instance.close()
             _instance = None

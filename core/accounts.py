@@ -38,14 +38,11 @@ PLATFORM_RULES = [
         # 三种形态：/u/<数字uid>、/n/<昵称>、/<昵称>；昵称在链接里常是 percent-encoding
         #（`weibo.com/n/%E9%98%BF%E8%96%B0`），所以要放行 %XX。
         "re": re.compile(
-            r"^https?://(?:www\.|m\.)?weibo\.(?:com|cn)/(?:u/|n/)?"
+            r"^https?://(?:www\.|m\.)?weibo\.(?:com|cn)/(u/|n/)?"
             r"((?:\d{6,})|(?:[A-Za-z0-9_\-]|%[0-9A-Fa-f]{2}){3,60})(?:/|$|\?)",
             re.I,
         ),
-        "clean": lambda m: {
-            "handle": unquote(m.group(1)),
-            "handleKey": unquote(m.group(1)).lower(),
-        },
+        "clean": lambda m: _clean_weibo(m),
     },
     {
         "platform": "bilibili",
@@ -57,11 +54,17 @@ PLATFORM_RULES = [
     },
     {
         "platform": "instagram",
+        # Lens 常给帖子链接 /p/ /reel/；用户名后面允许跟内容路径，再收成主页。
         "re": re.compile(
-            r"^https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.]{2,30})/?(?:\?|$)",
+            r"^https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.]{2,30})"
+            r"(?:/(?:p|reel|reels)/[^/?#]+)?/?(?:\?|$|#)",
             re.I,
         ),
-        "clean": lambda m: {"handle": "@" + m.group(1), "handleKey": m.group(1).lower()},
+        "clean": lambda m: {
+            "handle": "@" + m.group(1),
+            "handleKey": m.group(1).lower(),
+            "url": f"https://www.instagram.com/{m.group(1)}/",
+        },
     },
     {
         "platform": "pixiv",
@@ -178,6 +181,23 @@ _URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>）)]+")
 _WEIBO_NICK = re.compile(r"weibo\.com/n/([^/?#]+)", re.I)
 
 
+def _clean_weibo(m: re.Match) -> dict:
+    """微博链接收成主页：/u/{uid} 或 /n/{昵称}，丢掉后面的内容路径。"""
+    prefix = (m.group(1) or "").lower()
+    handle = unquote(m.group(2) or "")
+    if handle.isdigit() or prefix == "u/":
+        return {
+            "handle": handle,
+            "handleKey": handle.lower(),
+            "url": f"https://weibo.com/u/{handle}",
+        }
+    return {
+        "handle": handle,
+        "handleKey": handle.lower(),
+        "url": f"https://weibo.com/n/{handle}",
+    }
+
+
 def match_platform(url) -> dict | None:
     """把一条链接认成「哪个平台的哪个号」；认不出返回 None。"""
     text = str(url if url is not None else "")
@@ -185,7 +205,10 @@ def match_platform(url) -> dict | None:
         m = rule["re"].match(text)
         if not m:
             continue
-        handle = str(m.group(1) or "")
+        # 微博规则多捕获了一组路径前缀，handle 在 group(2)
+        handle = str(
+            (m.group(2) if rule["platform"] == "weibo" else m.group(1)) or ""
+        )
         deny = PATH_DENY.get(rule["platform"], [])
         if handle.lower() in deny:
             continue
@@ -196,7 +219,7 @@ def match_platform(url) -> dict | None:
                 if not re.fullmatch(r"(?:[A-Za-z0-9_\-]|%[0-9A-Fa-f]{2}){3,60}", handle):
                     continue
         if rule["platform"] == "instagram" and re.fullmatch(
-            r"(p|reel|explore|accounts|stories)", handle, re.I
+            r"(p|reel|reels|explore|accounts|stories)", handle, re.I
         ):
             continue
         if rule["platform"] == "twitter" and re.fullmatch(
@@ -778,10 +801,15 @@ def drop_weak_artwork(accounts, min_similarity: float = 0.8) -> tuple[list[dict]
             kept.append(account)
             continue
         raw = (account.get("evidence") or {}).get("similarity")
+        # None = 未知（Lens/SerpApi 没有分数），不能当成 0 分丢掉。
+        if raw is None:
+            kept.append(account)
+            continue
         try:
-            similarity = float(raw) if raw is not None else 0.0
+            similarity = float(raw)
         except (TypeError, ValueError):
-            similarity = 0.0
+            kept.append(account)
+            continue
         if similarity >= limit:
             kept.append(account)
         else:

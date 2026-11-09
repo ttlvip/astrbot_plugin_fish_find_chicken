@@ -260,18 +260,24 @@ async def serpapi_lens_search(
             except Exception:  # noqa: BLE001 - 日志回调出错不能影响查询
                 pass
 
+    import time
+
+    # 上传和查询共用一个截止时间，避免上传吃满 timeout 后查询还被外层立刻取消（仍可能已计费）。
+    deadline = time.monotonic() + max(5.0, float(timeout))
+    upload_budget = max(5.0, min(40.0, deadline - time.monotonic()))
     image_id = await upload_image(
-        content, mime_type, api_key=key, proxy=proxy, timeout=min(40.0, timeout)
+        content, mime_type, api_key=key, proxy=proxy, timeout=upload_budget
     )
     log(f"SerpApi 上传完成，image_id={image_id[:12]}…")
 
+    query_budget = max(5.0, deadline - time.monotonic())
     try:
         result = await request(
             "GET",
             SERPAPI_SEARCH_URL,
             params={"engine": "google_lens", "image_id": image_id, "api_key": key},
             headers={"Accept": "application/json"},
-            timeout=timeout,
+            timeout=query_budget,
             proxy=proxy,
         )
     except HttpError as exc:

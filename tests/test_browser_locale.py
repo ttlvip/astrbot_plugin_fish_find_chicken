@@ -100,6 +100,31 @@ class LaunchArgsTest(unittest.TestCase):
         )
         self.assertFalse([item for item in args if item.startswith(("--lang=", "--accept-lang="))])
 
+    def test_no_sandbox_only_when_bypass_needed(self):
+        # 本机可能是 Windows；这里强制走 Linux 分支验证沙箱参数。
+        with patch("core.browser.os.name", "posix"):
+            with patch("core.browser._needs_chromium_sandbox_bypass", return_value=False):
+                args = browser_mod._build_args(
+                    "/usr/bin/chromium", "", Path("/tmp/profile"), True, DEFAULT_LOCALE
+                )
+            self.assertNotIn("--no-sandbox", args)
+            self.assertIn("--disable-dev-shm-usage", args)
+
+            with patch("core.browser._needs_chromium_sandbox_bypass", return_value=True):
+                args = browser_mod._build_args(
+                    "/usr/bin/chromium", "", Path("/tmp/profile"), True, DEFAULT_LOCALE
+                )
+            self.assertIn("--no-sandbox", args)
+            self.assertIn("--disable-dev-shm-usage", args)
+
+
+class GoogleAuthCookieTest(unittest.TestCase):
+    def test_auth_cookie_names_detected(self):
+        for name in ("SID", "SSID", "HSID", "__Secure-1PSID", "__Secure-1PSIDTS", "SAPISID"):
+            self.assertTrue(browser_mod._is_google_auth_cookie(name), name)
+        for name in ("NID", "CONSENT", "SOCS", "AEC"):
+            self.assertFalse(browser_mod._is_google_auth_cookie(name), name)
+
 
 class ResolveLocaleTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

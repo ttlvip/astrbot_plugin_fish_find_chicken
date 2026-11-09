@@ -85,6 +85,7 @@ class FishFindChicken(Star):
         self._store: StateStore | None = None
         # 反查很重（Lens 要开无头浏览器），并发必须收着点，否则一次来三张图会把机器压满
         self._semaphore: asyncio.Semaphore | None = None
+        self._semaphore_limit: int | None = None
         self._temp_dirs: list[str] = []
 
     # ── 生命周期 ────────────────────────────────────────────────────────
@@ -179,6 +180,7 @@ class FishFindChicken(Star):
             return
 
         store = await self._ensure_store()
+        # 只做预检；真正扣费在查完之后（命中缓存不扣，取图失败也不扣）。
         ok, reason = store.quota_check(
             key=self._quota_key(event),
             user_id=self._user_id(event),
@@ -207,12 +209,6 @@ class FishFindChicken(Star):
             yield event.plain_result("要引用一张图（或者图跟指令一起发）再发 /鱼鱼找鸡")
             return
 
-        await store.charge(
-            key=self._quota_key(event),
-            user_id=self._user_id(event),
-            is_admin=self._is_admin(event),
-        )
-
         if settings.notify_start:
             yield event.plain_result(WELCOME)
 
@@ -237,6 +233,20 @@ class FishFindChicken(Star):
         finally:
             # 只删我们自己下的临时图，别动 AstrBot 的媒体缓存
             self._drop_temp(image_path)
+
+        # 命中缓存不扣配额；真正查过才原子扣费（锁内再判冷却/日限）。
+        if not result.get("cached"):
+            charged, charge_reason = await store.try_charge(
+                key=self._quota_key(event),
+                user_id=self._user_id(event),
+                is_admin=self._is_admin(event),
+                cooldown_sec=settings.cooldown_sec,
+                per_user_day=settings.per_user_day,
+                global_day=settings.global_day,
+            )
+            if not charged:
+                yield event.plain_result(charge_reason)
+                return
 
         accounts = result.get("accounts") or []
         if not accounts and not settings.send_on_miss:
@@ -340,16 +350,40 @@ class FishFindChicken(Star):
 
         from .core.browser import close_browser
 
-        try:
-            await close_browser()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[鱼鱼找鸡] 关闭浏览器失败：{exc}")
+        # 和查询共用信号量，避免正在 Lens 时把浏览器杀掉。
+        sem = self._search_semaphore(settings)
+        async with sem:
+            try:
+                await close_browser()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[鱼鱼找鸡] 关闭浏览器失败：{exc}")
 
-        profile = Path(settings.browser_profile) if settings.browser_profile else None
-        removed = False
-        if profile and profile.is_dir():
-            removed = shutil.rmtree(profile, ignore_errors=True) is None
+            profile = Path(settings.browser_profile) if settings.browser_profile else None
+            data_root = self._data_dir().resolve()
+            removed = False
+            remove_error = ""
+            if profile and profile.is_dir():
+                try:
+                    resolved = profile.resolve()
+                    # 只允许清插件 data 目录下的 profile，防配置写成家目录被误删。
+                    resolved.relative_to(data_root)
+                except (OSError, ValueError):
+                    yield event.plain_result(
+                        f"profile 不在插件数据目录内，拒绝删除：{profile}\n"
+                        f"请把 browser_profile 配到 {data_root} 下。"
+                    )
+                    return
+                try:
+                    shutil.rmtree(resolved)
+                except OSError as exc:
+                    remove_error = str(exc)
+                removed = not resolved.exists()
 
+        if remove_error:
+            yield event.plain_result(
+                f"浏览器已关闭，但 profile 没清干净：{profile}\n原因：{remove_error}"
+            )
+            return
         yield event.plain_result(
             (
                 f"已清掉浏览器 profile：{profile}\n"
@@ -454,7 +488,7 @@ class FishFindChicken(Star):
         # ① 当前消息里直接带的图
         comp = self._first_image(event.get_messages())
         if comp is not None:
-            return await self._component_to_path(comp, settings)
+            return await self._component_to_path(comp, settings, event=event)
 
         # ② 引用消息里的图
         for item in event.get_messages():
@@ -462,10 +496,10 @@ class FishFindChicken(Star):
                 continue
             comp = self._first_image(getattr(item, "chain", None) or [])
             if comp is not None:
-                return await self._component_to_path(comp, settings)
+                return await self._component_to_path(comp, settings, event=event)
             quoted = await self._quoted_image_from_platform(event, item.id)
             if quoted is not None:
-                return await self._component_to_path(quoted, settings)
+                return await self._component_to_path(quoted, settings, event=event)
 
         # ③ 参数里给的网址
         if arg and HTTP_RE.match(arg):
@@ -476,12 +510,11 @@ class FishFindChicken(Star):
             )
             return self._write_temp(data, mime)
 
-        # ④ 参数里给的本机路径（默认关，只有机器人主人自己方便用）
+        # ④ 参数里给的本机路径（默认关；开了也仅管理员，且必须落在插件 data 下）
         if arg and settings.allow_local_path:
             path = Path(arg).expanduser()
             if path.is_file():
-                self._check_size(path.stat().st_size, settings)
-                return str(path)
+                return self._local_path_under_data(arg, settings, require_admin=True, event=event)
         return ""
 
     @staticmethod
@@ -520,7 +553,9 @@ class FishFindChicken(Star):
                 return Comp.Image(file=url)
         return None
 
-    async def _component_to_path(self, comp: Comp.Image, settings: Settings) -> str:
+    async def _component_to_path(
+        self, comp: Comp.Image, settings: Settings, *, event: AstrMessageEvent | None = None
+    ) -> str:
         """把 AstrBot 的图片组件落成本地文件（统一放进我们自己的临时目录）。"""
         try:
             path = await comp.convert_to_file_path()
@@ -532,7 +567,7 @@ class FishFindChicken(Star):
         raw = (getattr(comp, "url", "") or getattr(comp, "file", "") or "").strip()
         if not raw:
             raise HttpError("这条消息里的图没有可用的地址")
-        return await self._materialize(raw, settings)
+        return await self._materialize(raw, settings, event=event)
 
     def _stage(self, path: str) -> str:
         """把外部文件拷进临时目录 —— 这样后面能安心删，也不会碰到 AstrBot 的媒体缓存。"""
@@ -574,30 +609,75 @@ class FishFindChicken(Star):
             except OSError:
                 continue
 
-    async def _materialize(self, raw: str, settings: Settings) -> str:
+    async def _materialize(
+        self, raw: str, settings: Settings, *, event: AstrMessageEvent | None = None
+    ) -> str:
         if raw.startswith("base64://"):
-            data = base64.b64decode(raw[len("base64://") :])
+            payload = raw[len("base64://") :]
+            # 粗估解码后大小，避免超大 base64 先吃满内存再报错。
+            approx = (len(payload) * 3) // 4
+            self._check_size(approx, settings)
+            data = base64.b64decode(payload)
             self._check_size(len(data), settings)
             return self._write_temp(data, sniff_mime(data))
         if raw.startswith("data:image/"):
-            data = base64.b64decode(raw.split(",", 1)[1])
+            payload = raw.split(",", 1)[1] if "," in raw else ""
+            approx = (len(payload) * 3) // 4
+            self._check_size(approx, settings)
+            data = base64.b64decode(payload)
             self._check_size(len(data), settings)
             return self._write_temp(data, sniff_mime(data))
         if raw.startswith("file://"):
-            path = Path(raw[len("file://") :])
-            if path.is_file():
-                self._check_size(path.stat().st_size, settings)
-                return self._stage(str(path))
+            if not settings.allow_local_path:
+                raise HttpError("没开「本地路径反查」")
+            return self._local_path_under_data(
+                self._file_url_to_path(raw), settings, require_admin=True, event=event
+            )
         if HTTP_RE.match(raw):
             data, mime = await download_image(
                 raw, proxy=settings.proxy, max_bytes=settings.max_image_bytes
             )
             return self._write_temp(data, mime)
-        path = Path(raw)
-        if path.is_file():
-            self._check_size(path.stat().st_size, settings)
-            return self._stage(str(path))
-        raise HttpError("图片地址既不是网址也不是本地文件")
+        # 裸本地路径同样受开关约束，不能绕过 allow_local_path。
+        if not settings.allow_local_path:
+            raise HttpError("图片地址既不是网址也不是可用的本地文件")
+        return self._local_path_under_data(raw, settings, require_admin=True, event=event)
+
+    @staticmethod
+    def _file_url_to_path(raw: str) -> str:
+        """把 file:// URL 收成操作系统路径（兼容 Windows 的 file:///C:/...）。"""
+        from urllib.parse import unquote, urlsplit
+
+        parts = urlsplit(raw)
+        path = unquote(parts.path or "")
+        if parts.netloc and parts.netloc not in ("localhost", "127.0.0.1"):
+            # UNC：file://server/share/...
+            return f"//{parts.netloc}{path}"
+        # file:///C:/foo → /C:/foo → C:/foo
+        if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+        return path
+
+    def _local_path_under_data(
+        self,
+        raw,
+        settings: Settings,
+        *,
+        require_admin: bool,
+        event: AstrMessageEvent | None,
+    ) -> str:
+        if require_admin and event is not None and not self._is_admin(event):
+            raise HttpError("本地路径反查只有管理员能用")
+        path = Path(str(raw)).expanduser()
+        if not path.is_file():
+            raise HttpError("本地文件不存在")
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(self._data_dir().resolve())
+        except (OSError, ValueError) as exc:
+            raise HttpError("本地路径必须落在插件数据目录内") from exc
+        self._check_size(resolved.stat().st_size, settings)
+        return self._stage(str(resolved))
 
     def _check_size(self, size: int, settings: Settings) -> None:
         limit = settings.max_image_bytes
@@ -611,10 +691,16 @@ class FishFindChicken(Star):
         return str(path)
 
     # ── 反查 ────────────────────────────────────────────────────────────
+    def _search_semaphore(self, settings: Settings) -> asyncio.Semaphore:
+        """按当前配置拿并发信号量；max_concurrent 变了就重建。"""
+        limit = max(1, settings.max_concurrent)
+        if self._semaphore is None or self._semaphore_limit != limit:
+            self._semaphore = asyncio.Semaphore(limit)
+            self._semaphore_limit = limit
+        return self._semaphore
+
     async def _search(self, data: bytes, mime: str, settings: Settings) -> dict:
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(max(1, settings.max_concurrent))
-        async with self._semaphore:
+        async with self._search_semaphore(settings):
             return await search_image(
                 data,
                 mime,
@@ -658,7 +744,8 @@ class FishFindChicken(Star):
             result = await request(
                 "GET", "https://lens.google.com/", proxy=normalize_proxy(proxy), timeout=8.0
             )
-            return result.status < 500
+            # 只有 2xx/3xx 算通；407/403 说明代理或谷歌拦了，不能报「通」。
+            return 200 <= result.status < 400
         except Exception:  # noqa: BLE001
             return False
 

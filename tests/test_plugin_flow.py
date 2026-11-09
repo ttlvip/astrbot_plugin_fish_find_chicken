@@ -168,6 +168,60 @@ class PluginFlowTest(unittest.TestCase):
             messages=[Comp.Image(path=str(self.image_path))]))
         self.assertIn("秒后再发", self._texts(again)[0])
 
+    def test_cached_hit_does_not_charge(self):
+        self.plugin.config["cooldown_sec"] = 30
+        self.plugin.config["notify_start"] = False
+
+        async def fake_search(data, mime, settings):
+            return {
+                "accounts": [],
+                "candidates": [],
+                "text": "❌ 没查到账号。",
+                "enginesUsed": ["lens"],
+                "failures": [],
+                "cached": True,
+            }
+
+        self.plugin._search = fake_search
+        event = self._event(messages=[Comp.Image(path=str(self.image_path))])
+        self._collect(self.plugin.fish_find_chicken, event)
+        # 命中缓存不扣配额，冷却不应生效
+        again = self._collect(
+            self.plugin.fish_find_chicken,
+            self._event(messages=[Comp.Image(path=str(self.image_path))]),
+        )
+        self.assertIn("没查到账号", self._texts(again)[-1])
+        self.assertNotIn("秒后再发", self._texts(again)[0])
+
+    def test_search_exception_does_not_charge(self):
+        self.plugin.config["cooldown_sec"] = 30
+        self.plugin.config["notify_start"] = False
+
+        async def boom(data, mime, settings):
+            raise RuntimeError("boom")
+
+        self.plugin._search = boom
+        event = self._event(messages=[Comp.Image(path=str(self.image_path))])
+        self._collect(self.plugin.fish_find_chicken, event)
+        # 反查失败不扣费，立刻再查不应被冷却拦住
+        async def ok(data, mime, settings):
+            return {
+                "accounts": [],
+                "candidates": [],
+                "text": "❌ 没查到账号。",
+                "enginesUsed": ["lens"],
+                "failures": [],
+            }
+
+        self.plugin._search = ok
+        again = self._texts(
+            self._collect(
+                self.plugin.fish_find_chicken,
+                self._event(messages=[Comp.Image(path=str(self.image_path))]),
+            )
+        )
+        self.assertIn("没查到账号", again[-1])
+
     def test_quoted_image_via_reply_chain(self):
         canned = {
             "accounts": [],

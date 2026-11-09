@@ -19,7 +19,7 @@ import stub_astrbot  # noqa: E402
 
 stub_astrbot.install()
 
-from core.browser import BrowserError, normalize_cdp_base  # noqa: E402
+from core.browser import BrowserError, normalize_cdp_base, rewrite_ws_url  # noqa: E402
 from core.config import Settings  # noqa: E402
 
 
@@ -60,6 +60,22 @@ class NormalizeCdpBaseTest(unittest.TestCase):
             normalize_cdp_base("ftp://chrome:9222")
         with self.assertRaises(BrowserError):
             normalize_cdp_base("http://")
+
+
+class RewriteWsUrlTest(unittest.TestCase):
+    def test_rewrites_loopback_to_configured_host(self):
+        ws = rewrite_ws_url(
+            "ws://127.0.0.1:9222/devtools/page/ABC",
+            "http://chrome:9222",
+        )
+        self.assertEqual(ws, "ws://chrome:9222/devtools/page/ABC")
+
+    def test_https_base_becomes_wss(self):
+        ws = rewrite_ws_url(
+            "ws://127.0.0.1:9222/devtools/page/ABC",
+            "https://chrome.example.com:9222",
+        )
+        self.assertEqual(ws, "wss://chrome.example.com:9222/devtools/page/ABC")
 
 
 class SettingsCdpTest(unittest.TestCase):

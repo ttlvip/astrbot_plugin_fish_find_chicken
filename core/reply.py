@@ -106,7 +106,8 @@ def _ranked_sources(candidates, limit: int = 5, per_host: int = 2) -> list[dict]
     rows.sort(
         key=lambda r: (
             0 if r["social"] else 1,
-            -(r["similarity"] if r["similarity"] is not None else -1.0),
+            # 无分数按「未知」处理，不要排到所有有分数结果后面（否则弱 SauceNAO 压过 Lens）。
+            -(r["similarity"] if r["similarity"] is not None else 0.0),
             r["index"],
         )
     )
@@ -138,21 +139,23 @@ def _ranked_sources(candidates, limit: int = 5, per_host: int = 2) -> list[dict]
 
 
 def _format_sources(rows: list[dict]) -> list[str]:
-    """把候选图源排成「序号. 站点｜标题 — 链接」的一行一条。"""
+    """把候选图源排成「序号. 站点｜标题 — 链接」的一行一条。
+
+    URL 保持完整：从中间截断会让推文 id / 小红书 token 失效，QQ 里点不开。
+    总长度吃紧时由上层 ``_fit`` 删掉后面的条目，不要改 URL 字符串。
+    """
     lines = []
     for position, row in enumerate(rows, start=1):
         site = row["host"] or "未知站点"
         title = row["title"]
-        # 链接太长就把中间省略，保留域名 + 尾部（帖子 id 在尾部，最有用）
         url = row["url"]
-        if len(url) > 78:
-            url = url[:52] + "…" + url[-24:]
         head = f"{position}. {site}"
         if row["similarity"] is not None:
             head += f"（相似度 {row['similarity'] * 100:.0f}%）"
         if title:
             head += f"｜{title}"
-        lines.append(f"{head} — {url}")
+        # 链接单独占一行，避免和标题挤在一起被 _fit 从中间切断。
+        lines.append(f"{head}\n{url}")
     return lines
 
 HEAD = "🎯 **鱼鱼找鸡结果**"

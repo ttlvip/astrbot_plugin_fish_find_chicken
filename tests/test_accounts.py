@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.accounts import (  # noqa: E402
     account_name_of,
     display_handle,
+    drop_weak_artwork,
     extract_accounts,
     match_platform,
     normalize_person_name,
@@ -41,8 +42,21 @@ class MatchPlatformTest(unittest.TestCase):
     def test_weibo_nick_and_uid(self):
         nick = match_platform("https://weibo.com/n/%E9%98%BF%E8%96%B0kaOri")
         self.assertEqual(nick["platform"], "weibo")
+        self.assertEqual(nick["url"], "https://weibo.com/n/阿薰kaOri")
         uid = match_platform("https://weibo.com/u/1234567890")
         self.assertEqual(uid["handle"], "1234567890")
+        self.assertEqual(uid["url"], "https://weibo.com/u/1234567890")
+        # 内容路径也应收成主页
+        deep = match_platform("https://weibo.com/u/1234567890/XXXX")
+        self.assertEqual(deep["url"], "https://weibo.com/u/1234567890")
+
+    def test_instagram_post_converges_to_profile(self):
+        hit = match_platform("https://www.instagram.com/some_user/p/AbCdEf123/")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["platform"], "instagram")
+        self.assertEqual(hit["handle"], "@some_user")
+        self.assertEqual(hit["url"], "https://www.instagram.com/some_user/")
+        self.assertIsNone(match_platform("https://www.instagram.com/p/AbCdEf123/"))
 
     def test_weibo_article_page_is_not_account(self):
         self.assertIsNone(match_platform("https://weibo.com/ttarticle/p/show?id=2309404"))
@@ -316,6 +330,34 @@ class MatchLinkTest(unittest.TestCase):
         account = extract_accounts(candidates, strict_names=False)[0]
         self.assertEqual(account["handle"], "@izayoill")
         self.assertNotIn("someone_else", account["matchUrl"])
+
+
+class DropWeakArtworkTest(unittest.TestCase):
+    def test_none_similarity_kept(self):
+        accounts = [
+            {
+                "platform": "pixiv",
+                "handle": "1",
+                "url": "https://www.pixiv.net/users/1",
+                "evidence": {"similarity": None},
+            }
+        ]
+        kept, dropped = drop_weak_artwork(accounts, 0.8)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, 0)
+
+    def test_low_score_dropped(self):
+        accounts = [
+            {
+                "platform": "pixiv",
+                "handle": "1",
+                "url": "https://www.pixiv.net/users/1",
+                "evidence": {"similarity": 0.4},
+            }
+        ]
+        kept, dropped = drop_weak_artwork(accounts, 0.8)
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, 1)
 
 
 if __name__ == "__main__":

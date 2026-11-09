@@ -36,7 +36,16 @@ def engine_labels(engines) -> list[str]:
 
 
 def _upload_name(mime_type: str) -> str:
-    return "image.jpg" if (mime_type or "").lower() == "image/jpeg" else "image.png"
+    mime = (mime_type or "").lower()
+    if mime == "image/jpeg":
+        return "image.jpg"
+    if mime == "image/webp":
+        return "image.webp"
+    if mime == "image/gif":
+        return "image.gif"
+    if mime == "image/png":
+        return "image.png"
+    return "image.jpg"
 
 
 # ── SauceNAO ──────────────────────────────────────────────────────────────
@@ -292,6 +301,7 @@ async def reverse_search(
             except Exception as exc:  # noqa: BLE001
                 failures.append({"engine": "lens", "reason": f"SerpApi 模块不可用：{exc}"})
                 return
+            serpapi_timeout = max(timeout, 45.0)
             try:
                 found = await asyncio.wait_for(
                     serpapi_lens_search(
@@ -299,12 +309,18 @@ async def reverse_search(
                         mime_type,
                         api_key=settings.serpapi_api_key,
                         proxy=settings.proxy,
-                        timeout=max(timeout, 45.0),
+                        timeout=serpapi_timeout,
                         on_log=log,
                     ),
-                    timeout=max(timeout, 45.0) + 10,
+                    # 上传+查询共用 deadline，外层要盖得住整段。
+                    timeout=serpapi_timeout + 15,
                 )
             except SerpApiError as exc:
+                if getattr(exc, "code", "") == "EMPTY":
+                    engines_used.append("lens")
+                    failures.append({"engine": "lens", "reason": "空结果"})
+                    log(f"[鱼鱼找鸡] lens（SerpApi）空结果：{exc}")
+                    return
                 failures.append({"engine": "lens", "reason": str(exc)})
                 log(f"[鱼鱼找鸡] lens（SerpApi）失败：{exc}")
                 return
@@ -376,10 +392,12 @@ async def reverse_search(
         if runner is None:
             failures.append({"engine": engine, "reason": "未实现的引擎"})
             return
+        # IQDB 内部会把超时抬到至少 35 秒，外层必须盖得住，否则永远被外层先杀。
+        outer = max(timeout, 35.0) + 10 if engine == "iqdb" else timeout + 10
         try:
             found = await asyncio.wait_for(
                 runner(content, mime_type, timeout=timeout, proxy=settings.proxy),
-                timeout=timeout + 10,
+                timeout=outer,
             )
         except asyncio.TimeoutError:
             failures.append({"engine": engine, "reason": "超时"})
@@ -418,9 +436,9 @@ async def reverse_search(
 
 # ── 正则 ──────────────────────────────────────────────────────────────────
 _RESULT_SPLIT = re.compile(r'<div class="result\b')
-_SIM_INFO = re.compile(r"resultsimilarityinfo[^>]*>\s*([\d.]+)%")
-_SIM_ALT = re.compile(r"similarity-info[^>]*>[\s\S]{0,120}?([\d.]+)%")
-_ANY_PERCENT = re.compile(r"([\d.]+)%")
+_SIM_INFO = re.compile(r"resultsimilarityinfo[^>]*>\s*(\d+(?:\.\d+)?)%")
+_SIM_ALT = re.compile(r"similarity-info[^>]*>[\s\S]{0,120}?(\d+(?:\.\d+)?)%")
+_ANY_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 _TITLE_STRONG = re.compile(r'class="resulttitle"[\s\S]{0,400}?<strong[^>]*>([\s\S]*?)</strong>', re.I)
 _TITLE_PLAIN = re.compile(r'class="resulttitle"[\s\S]{0,200}?>\s*([^<]{2,200})<', re.I)
 _HREF = re.compile(r'href="([^"]+)"')

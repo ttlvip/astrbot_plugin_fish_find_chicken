@@ -74,7 +74,10 @@ SOCIAL_TEXT_RE = re.compile(
     r"微博|推特|哔哩哔哩|小红书|抖音|bilibili)",
     re.I,
 )
-_SOCIAL_WORD_RE = re.compile(r"(?<![0-9A-Za-z_])(?:ins|X|b站)(?![0-9A-Za-z_])", re.I)
+# 站点简称：ins / b站 可忽略大小写；单独的「X」必须大写（不用 re.I），
+# 否则英文里的 "x" / "2 x 2" 会被当成社交卡，挤掉真正的主页名额。
+_SOCIAL_WORD_RE = re.compile(r"(?<![0-9A-Za-z_])(?:ins|b站)(?![0-9A-Za-z_])", re.I)
+_SOCIAL_X_RE = re.compile(r"(?<![0-9A-Za-z_])X(?![0-9A-Za-z_])")
 
 # 谷歌自己的 5xx 页面（实测 502：「The server encountered a temporary error」）。
 # 命中它说明是上游故障，不是「这张图搜不到」，两者要给用户不同的结论。
@@ -305,10 +308,16 @@ async def lens_search(
         except BrowserError as exc:
             raise _as_lens_error(exc) from exc
         log(f"浏览器就绪（{time.monotonic() - t0:.1f}s）")
+        # profile 里若残留 Google 登录态，Lens 会提示「图片未与 xxx@gmail.com 关联」。
+        # 反查不需要登录，每次查询前先清掉登录 cookie。
+        cleared = await browser.clear_google_login_cookies()
+        if cleared:
+            log(f"已清掉 {cleared} 个谷歌登录态 cookie")
         if (google_cookie or "").strip():
             # 每次查询前都注入一次：浏览器可能被重启，cookie 也就没了。
+            # set_cookies 默认会丢掉 SID 等登录态，只保留 NID 一类访客/反滥用 cookie。
             injected = await browser.set_cookies(google_cookie)
-            log(f"已注入 {injected} 个 google cookie")
+            log(f"已注入 {injected} 个 google cookie（已排除登录态）")
 
         try:
             cards = await asyncio.wait_for(
@@ -332,14 +341,14 @@ async def lens_search(
         t1 = time.monotonic()
         resolved = await _resolve_via_http(browser, picked, proxy, budget_end, log)
         used = "HTTP"
-        if not resolved and budget_end - time.monotonic() > 8:
-            # HTTP 路径没解全（cookie 缺失、被限流吃光预算等），剩下的用标签页兜底。
-            log(f"HTTP 只解析出 {len(resolved)} 条，剩余用标签页兜底")
-            rest_pairs = [(i, c) for i, c in enumerate(picked) if i not in resolved]
+        rest_pairs = [(i, c) for i, c in enumerate(picked) if i not in resolved]
+        # 解出任意 1 条也不能跳过：剩下的卡片仍要用标签页兜底（限流/坏 token 很常见）。
+        if rest_pairs and budget_end - time.monotonic() > 8:
+            log(f"HTTP 只解析出 {len(resolved)}/{len(picked)} 条，剩余用标签页兜底")
             extra = await _resolve_cards(browser, [c for _, c in rest_pairs], budget_end, log)
             for offset, url in extra.items():
                 resolved[rest_pairs[offset][0]] = url
-            used = "HTTP+标签页"
+            used = "HTTP+标签页" if resolved else "标签页"
         log(f"解析出 {len(resolved)}/{len(picked)} 个真实地址（{used}，"
             f"{time.monotonic() - t1:.1f}s）")
         results = _build_results(picked, resolved)
@@ -446,6 +455,12 @@ async def _wait_cards(
         await asyncio.sleep(0.7)
         info = await _page_info(browser)
         _guard_captcha(info)
+        # 还停留在旧页（首页/上一次结果）时，卡片一律当无效，避免串图。
+        if not _is_lens_result_url(str(info.get("url") or "")):
+            cards = []
+            last_n = -1
+            stable = 0
+            continue
         cards = await _collect_cards(browser)
         if len(cards) >= min_cards:
             break
@@ -464,8 +479,22 @@ async def _wait_cards(
     await asyncio.sleep(1.0)
     info = await _page_info(browser)
     _guard_captcha(info)
+    if not _is_lens_result_url(str(info.get("url") or "")):
+        return [], info
     settled = await _collect_cards(browser)
     return (settled or cards), info
+
+
+def _is_lens_result_url(url: str) -> bool:
+    """当前页是不是 Lens 结果页（含落地页 / 完全匹配 / 外观匹配标签）。"""
+    text = (url or "").lower()
+    if not text or text.startswith("about:"):
+        return False
+    if "lens.google.com" in text:
+        return True
+    if "/search" not in text:
+        return False
+    return "udm=" in text or "lns_" in text or "imgurl" in text or "lens" in text
 
 
 async def _collect_cards(target: Any) -> list[dict]:
@@ -585,7 +614,8 @@ async def _resolve_via_http(
     # 被限流的（index, 新 token 的绝对地址, 可以重试的时刻）
     pending: list[tuple[int, str, float]] = []
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    # trust_env=False：插件代理为空时不要偷偷吃 HTTPS_PROXY，否则和直连浏览器出口不一致。
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
 
         async def probe(index: int, token: str) -> None:
             """第一轮：并发试一遍，能直接 302 的立刻拿到，被限流的排进待重试队列。"""
@@ -807,12 +837,10 @@ async def _resolve_one(
                 return ""  # 已经被要求人机验证，这条放弃，别拖死整个查询
     finally:
         unsubscribe()
-
-    # 每条解析完都复位到 about:blank。不复位的话，下一条要在一个还在加载
-    # facebook/instagram 的渲染进程上执行 Page.navigate，实测会被卡住 4~7 秒
-    # （日志里表现为「浏览器没响应 Page.navigate」），而且那个 token 就废了。
-    with contextlib.suppress(BrowserError):
-        await tab.eval("location.href='about:blank'", timeout=2.0)
+        # 每条解析完（含验证码提前返回）都复位到 about:blank。
+        # 不复位的话，下一条要在还在加载的渲染进程上 Page.navigate，实测卡 4~7 秒。
+        with contextlib.suppress(BrowserError):
+            await tab.eval("location.href='about:blank'", timeout=2.0)
     return found
 
 
@@ -910,7 +938,11 @@ _REPLY_CARD_RE = re.compile(r"^(?:X|Twitter)?\s*Repl(?:y|ies)\s+by\b", re.I)
 
 def _looks_social(card: dict) -> bool:
     text = " ".join(str(card.get(k) or "") for k in ("site", "label", "title"))
-    return bool(SOCIAL_TEXT_RE.search(text) or _SOCIAL_WORD_RE.search(text))
+    return bool(
+        SOCIAL_TEXT_RE.search(text)
+        or _SOCIAL_WORD_RE.search(text)
+        or _SOCIAL_X_RE.search(text)
+    )
 
 
 def _build_results(picked: list[dict], resolved: dict[int, str]) -> list[dict]:

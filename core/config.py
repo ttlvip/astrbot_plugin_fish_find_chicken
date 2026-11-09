@@ -121,10 +121,11 @@ class Settings:
             inherited = str(global_cfg.get("http_proxy") or "").strip()
             if inherited:
                 proxy, source = inherited, "AstrBot 全局 http_proxy"
-        if not proxy:
-            env = _env_proxy()
-            if env:
-                proxy, source = env, "环境变量"
+            if not proxy:
+                # 只有「允许复用全局代理」时才吃环境变量；关掉后必须真正直连。
+                env = _env_proxy()
+                if env:
+                    proxy, source = env, "环境变量"
         try:
             proxy = normalize_proxy(proxy)
         except Exception:  # noqa: BLE001 - 配错了不该让插件加载失败，退回直连并保留原文

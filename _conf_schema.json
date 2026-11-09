@@ -102,7 +102,7 @@
     "type": "text",
     "description": "谷歌 cookie（降低人机验证概率）",
     "default": "",
-    "hint": "在你自己**已经过验证**的浏览器里打开 google.com，从开发者工具复制 Cookie 头整串粘进来，形如 NID=xxx; SID=yyy。注意：谷歌的反滥用 cookie 与出口 IP 绑定，必须和查询用同一个出口 IP。留空则不带。"
+    "hint": "在你自己**已经过验证**的浏览器里打开 google.com，从开发者工具复制 Cookie 头。优先只要 NID=… 这类访客 cookie；SID/SSID 等登录态会被插件自动丢掉（带着登录去搜本地图会出现「图片未与某账号关联」）。反滥用 cookie 与出口 IP 绑定，必须和查询用同一个出口。留空则不带。"
   },
   "cooldown_sec": {
     "type": "int",

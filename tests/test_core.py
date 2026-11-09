@@ -74,6 +74,14 @@ class SettingsTest(unittest.TestCase):
         )
         self.assertEqual(settings.proxy, "")
 
+    def test_disable_global_also_skips_env(self):
+        os.environ["HTTPS_PROXY"] = "http://env:9"
+        settings = Settings.from_config(
+            {"use_astrbot_proxy": False}, {"http_proxy": "http://b:2"}
+        )
+        self.assertEqual(settings.proxy, "")
+        self.assertEqual(settings.proxy_source, "无")
+
     def test_engines_filtered_and_fallback(self):
         self.assertEqual(Settings.from_config({"engines": ["lens", "nope"]}).engines, ["lens"])
         self.assertTrue(Settings.from_config({"engines": []}).engines)  # 回落到默认
@@ -170,6 +178,71 @@ class StateTest(unittest.TestCase):
         # 2026-01-01 00:30 北京时间 = 2025-12-31 16:30 UTC
         ts = 1767227400
         self.assertEqual(day_key(ts), "2026-01-01")
+
+    def test_try_charge_is_atomic(self):
+        ok, _ = asyncio.run(
+            self.store.try_charge(
+                key="g|u",
+                user_id="u",
+                cooldown_sec=0,
+                per_user_day=1,
+                global_day=100,
+                now=3000,
+            )
+        )
+        self.assertTrue(ok)
+        ok, reason = asyncio.run(
+            self.store.try_charge(
+                key="g|u2",
+                user_id="u",
+                cooldown_sec=0,
+                per_user_day=1,
+                global_day=100,
+                now=3001,
+            )
+        )
+        self.assertFalse(ok)
+        self.assertIn("今天的 1 次", reason)
+
+    def test_corrupt_quota_does_not_crash(self):
+        self.store._data["last"]["g|u"] = "bad"
+        self.store._data["day"]["user"]["u"] = {"day": day_key(4000), "count": "x"}
+        ok, _ = self.store.quota_check(
+            key="g|u", user_id="u", cooldown_sec=30, per_user_day=20, now=4000
+        )
+        self.assertTrue(ok)
+
+
+class CacheKeyTest(unittest.TestCase):
+    def test_settings_affect_key(self):
+        from core import cache_key_for
+
+        content = b"fake-image"
+        strict = Settings.from_config({"strict_consensus": True, "engines": ["lens"]})
+        loose = Settings.from_config({"strict_consensus": False, "engines": ["lens"]})
+        self.assertNotEqual(cache_key_for(content, strict), cache_key_for(content, loose))
+
+    def test_should_cache_blocks_failures(self):
+        from core import _should_cache
+
+        self.assertFalse(
+            _should_cache(
+                {
+                    "enginesUsed": ["saucenao"],
+                    "failures": [{"engine": "lens", "reason": "超时"}],
+                    "candidates": [],
+                }
+            )
+        )
+        self.assertTrue(
+            _should_cache(
+                {
+                    "enginesUsed": ["lens"],
+                    "failures": [],
+                    "candidates": [{"url": "https://x.com/a"}],
+                }
+            )
+        )
 
 
 class LoggingRuleTest(unittest.TestCase):
