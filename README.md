@@ -468,6 +468,7 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 .\tools\release.ps1 -DryRun        # 空跑：校验版本、跑测试、打包、打印计划，不发请求
 .\tools\release.ps1                # 正式发版
 .\tools\release.ps1 -BuildOnly     # 只打本地安装包，不碰 git / 网络
+.\tools\release.ps1 -Python .\.venv\Scripts\python.exe   # PATH 里的 python 缺 aiohttp 时
 ```
 
 前置条件：在 `main` 分支、工作区干净、提交已 push。凭据依次取 `-Token` → `GITHUB_TOKEN` →

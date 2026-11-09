@@ -28,6 +28,10 @@
     只打本地安装包，不碰 git、不碰网络。
 
 .EXAMPLE
+    .\tools\release.ps1 -Python .\.venv\Scripts\python.exe
+    系统 PATH 里的 python 没装 aiohttp / Pillow 时，指一个装齐依赖的解释器（脚本会自动探测 .venv）。
+
+.EXAMPLE
     .\tools\release.ps1 -Force
     同一个版本重发：tag 已存在时用它覆盖 Release 说明与附件。
 #>
@@ -41,6 +45,8 @@ param(
     [string]$OutDir = "",
     # 直接给 token（不推荐，会留在命令历史里）
     [string]$Token = "",
+    # 跑测试用的 python（留空自动探测；默认 py 常常没有 aiohttp/Pillow）
+    [string]$Python = "",
     # 建成草稿（自己可见，手动点发布）
     [switch]$Draft,
     # 空跑：做完本地检查就停
@@ -118,6 +124,45 @@ function Get-MetaVersion {
         if ($line -match '^version:\s*(\S+)\s*$') { return $Matches[1] }
     }
     Fail 'metadata.yaml 里没有 version 行'
+}
+
+function Resolve-Python {
+    # 「机器上装了 python」和「这个 python 能跑测试」是两件事：
+    # 系统 PATH 里的 python 往往没有 aiohttp / Pillow，得挑一个装齐依赖的。
+    $candidates = @()
+    if ($Python) { $candidates += $Python }
+    foreach ($rel in @('.venv\Scripts\python.exe', 'venv\Scripts\python.exe')) {
+        $candidates += (Join-Path $RepoRoot $rel)
+    }
+    foreach ($name in @('python', 'python3')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { $candidates += $cmd.Source }
+    }
+
+    $tried = @()
+    foreach ($exe in ($candidates | Select-Object -Unique)) {
+        if (-not (Test-Path $exe) -and -not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
+        $tried += $exe
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $exe -c "import aiohttp, PIL" *> $null
+            $ok = ($LASTEXITCODE -eq 0)
+        } catch {
+            $ok = $false
+        } finally {
+            $ErrorActionPreference = $prev
+        }
+        if ($ok) { return $exe }
+    }
+
+    Fail @"
+没找到装了 aiohttp + Pillow 的 python（试过：$($tried -join ', ')）。
+用 -Python 指过去，比如：
+  - 本地虚拟环境：-Python .\.venv\Scripts\python.exe
+  - 或者和 AstrBot 用同一个解释器
+实在要先发包：加 -SkipTests（不推荐，等于跳过发版门禁）。
+"@
 }
 
 function Get-HttpErrorBody($ErrorRecord) {
@@ -260,12 +305,13 @@ $dirty
 }
 
 if (-not $SkipTests -and -not $BuildOnly) {
-    Say "  [test] unittest ..." 'DarkGray'
+    $pyExe = Resolve-Python
+    Say "  [test] $pyExe" 'DarkGray'
     Push-Location $RepoRoot
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & python -m unittest discover -s tests -q
+        & $pyExe -m unittest discover -s tests -q
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEap
