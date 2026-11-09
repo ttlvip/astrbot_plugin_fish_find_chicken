@@ -350,6 +350,7 @@ astrbot_plugin_fish_find_chicken/
 │   ├── state.py            # 冷却 / 每日配额 / 结果缓存（原子写）
 │   └── textutil.py
 ├── tools/docker_check.sh   # 容器内一键自检（浏览器/代理/目录）
+├── tools/release.ps1       # 维护者发版：打 zip → 打 tag → 建 Release → 传附件
 ├── tests/                  # 离线单测（不联网、不需要 AstrBot）
 ├── _conf_schema.json
 ├── metadata.yaml
@@ -458,7 +459,23 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 * **代码由 AI 生成、测试覆盖有限**（见开头声明）。测试只覆盖纯逻辑与离线路径，
   真正的 Lens 反查、浏览器启动、人机验证这些必须在真机上跑的东西，基本上是测不到的。
 
-## 十一、致谢与许可
+## 十一、发版（维护者）
+
+版本号只认 `metadata.yaml` 一处。发版脚本按「先跑测试 → 再打 zip → 再推 tag → 建 Release → 传附件」的顺序走，
+中途任何一步失败都会停下并说清楚缺什么，不会留下半个 Release：
+
+```powershell
+.\tools\release.ps1 -DryRun        # 空跑：校验版本、跑测试、打包、打印计划，不发请求
+.\tools\release.ps1                # 正式发版
+.\tools\release.ps1 -BuildOnly     # 只打本地安装包，不碰 git / 网络
+```
+
+前置条件：在 `main` 分支、工作区干净、提交已 push。凭据依次取 `-Token` → `GITHUB_TOKEN` →
+`git credential fill`（Git 凭据管理器里已缓存的那个），**不写文件、不打印**。
+产物落在仓库上一级目录（AstrBot 的 `data/plugins`）：`astrbot_plugin_fish_find_chicken-<版本>.zip`
+给 Release，不带版本号的同名文件给本地安装。
+
+## 十二、致谢与许可
 
 **原项目作者**
 
