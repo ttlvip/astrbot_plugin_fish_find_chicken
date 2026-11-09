@@ -81,11 +81,34 @@ function Fail([string]$Text) {
 
 function Invoke-Git {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    $out = & git @Args 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Fail ("git " + ($Args -join ' ') + " 失败：`n" + ($out -join "`n"))
+    # PS 5.1 的坑：native 命令的 stderr 一旦重定向（2>&1 / *>）就变成 ErrorRecord，
+    # 在 $ErrorActionPreference='Stop' 下会被当成异常抛出 —— 而 git push 正常输出也走 stderr。
+    # 所以调用期间临时把 EAP 放回 Continue，靠 $LASTEXITCODE 判断成败。
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & git @Args 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($code -ne 0) {
+        Fail ("git " + ($Args -join ' ') + " 失败（退出码 $code）：`n" + ($out -join "`n"))
     }
     return ($out -join "`n").Trim()
+}
+
+function Test-GitRef {
+    param([string]$Ref)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & git rev-parse --verify --quiet $Ref *> $null
+        $ok = ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return $ok
 }
 
 function Get-MetaVersion {
@@ -239,10 +262,13 @@ $dirty
 if (-not $SkipTests -and -not $BuildOnly) {
     Say "  [test] unittest ..." 'DarkGray'
     Push-Location $RepoRoot
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        & python -m unittest discover -s tests -q 2>&1 | Out-Host
+        & python -m unittest discover -s tests -q
         $code = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $prevEap
         Pop-Location
     }
     if ($code -ne 0) { Fail "测试没过（退出码 $code）。修好再发，或临时加 -SkipTests。" }
@@ -261,9 +287,7 @@ if ($BuildOnly) {
 
 # ── 3. git 状态：提交必须已推送 ──────────────────────────────────────────
 
-$hasUpstream = $true
-& git rev-parse --verify --quiet origin/main *> $null
-if ($LASTEXITCODE -ne 0) { $hasUpstream = $false }
+$hasUpstream = Test-GitRef 'origin/main'
 if (-not $hasUpstream) { Fail '本地没有 origin/main，先 git fetch origin。' }
 
 $unpushed = Invoke-Git rev-list --count 'origin/main..HEAD'
@@ -271,9 +295,7 @@ if ([int]$unpushed -gt 0) {
     Fail "有 $unpushed 个提交还没推。先 git push，发版脚本只推 tag。"
 }
 
-$tagExists = $true
-& git rev-parse --verify --quiet "refs/tags/$tag" *> $null
-if ($LASTEXITCODE -ne 0) { $tagExists = $false }
+$tagExists = Test-GitRef "refs/tags/$tag"
 
 if ($tagExists -and -not $Force -and -not $DryRun) {
     Fail "tag $tag 已存在。改 metadata.yaml 升版本，或加 -Force 覆盖同一个版本的 Release。"
@@ -282,8 +304,14 @@ if ($tagExists -and -not $Force -and -not $DryRun) {
 # ── 4. Release 说明 ───────────────────────────────────────────────────────
 
 $compareBase = ''
-& git describe --tags --abbrev=0 HEAD *> $null
-if ($LASTEXITCODE -eq 0) { $compareBase = (& git describe --tags --abbrev=0 HEAD).Trim() }
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    $prevTag = & git describe --tags --abbrev=0 HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $prevTag) { $compareBase = ($prevTag -join '').Trim() }
+} finally {
+    $ErrorActionPreference = $prevEap
+}
 
 if ($NotesFile) {
     if (-not (Test-Path $NotesFile)) { Fail "说明文件不存在：$NotesFile" }
