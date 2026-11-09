@@ -86,20 +86,22 @@ function Fail([string]$Text) {
 }
 
 function Invoke-Git {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    # 不要用剩余参数直接吃 ``tag -a x -m y``：PowerShell 会把 -a/-m 当成本函数的命名参数。
+    # 调用方请传数组：Invoke-Git @('tag','-a',$tag,'-m',$Version)
+    param([Parameter(Mandatory = $true)][string[]]$GitArgs)
     # PS 5.1 的坑：native 命令的 stderr 一旦重定向（2>&1 / *>）就变成 ErrorRecord，
     # 在 $ErrorActionPreference='Stop' 下会被当成异常抛出 —— 而 git push 正常输出也走 stderr。
     # 所以调用期间临时把 EAP 放回 Continue，靠 $LASTEXITCODE 判断成败。
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $out = & git @Args 2>&1
+        $out = & git @GitArgs 2>&1
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prev
     }
     if ($code -ne 0) {
-        Fail ("git " + ($Args -join ' ') + " 失败（退出码 $code）：`n" + ($out -join "`n"))
+        Fail ("git " + ($GitArgs -join ' ') + " 失败（退出码 $code）：`n" + ($out -join "`n"))
     }
     return ($out -join "`n").Trim()
 }
@@ -292,10 +294,10 @@ Say "  输出：$OutDir"
 # ── 2. 本地检查 ───────────────────────────────────────────────────────────
 
 if (-not $BuildOnly) {
-    $branch = Invoke-Git rev-parse --abbrev-ref HEAD
+    $branch = Invoke-Git @('rev-parse', '--abbrev-ref', 'HEAD')
     if ($branch -ne 'main') { Fail "当前分支是 $branch，发版只从 main 走。" }
 
-    $dirty = Invoke-Git status --porcelain
+    $dirty = Invoke-Git @('status', '--porcelain')
     if ($dirty) {
         Fail @"
 工作区不干净，先把改动提交掉：
@@ -336,7 +338,7 @@ if ($BuildOnly) {
 $hasUpstream = Test-GitRef 'origin/main'
 if (-not $hasUpstream) { Fail '本地没有 origin/main，先 git fetch origin。' }
 
-$unpushed = Invoke-Git rev-list --count 'origin/main..HEAD'
+$unpushed = Invoke-Git @('rev-list', '--count', 'origin/main..HEAD')
 if ([int]$unpushed -gt 0) {
     Fail "有 $unpushed 个提交还没推。先 git push，发版脚本只推 tag。"
 }
@@ -410,12 +412,12 @@ if ($DryRun) {
 # ── 6. 打 tag ─────────────────────────────────────────────────────────────
 
 if (-not $tagExists) {
-    $null = Invoke-Git tag -a $tag -m "$Version"
-    $null = Invoke-Git push origin $tag
+    $null = Invoke-Git @('tag', '-a', $tag, '-m', $Version)
+    $null = Invoke-Git @('push', 'origin', $tag)
     Say "  [tag] $tag 已创建并推送" 'Green'
 } elseif ($Force) {
-    $tagCommit = Invoke-Git rev-parse --short "$tag^{commit}"
-    $headCommit = Invoke-Git rev-parse --short HEAD
+    $tagCommit = Invoke-Git @('rev-parse', '--short', "$tag^{commit}")
+    $headCommit = Invoke-Git @('rev-parse', '--short', 'HEAD')
     if ($tagCommit -ne $headCommit) {
         Say "  [tag] $tag 指向 $tagCommit，HEAD 是 $headCommit：附件按 HEAD 打包，和 tag 内容不一致" 'Yellow'
     } else {
