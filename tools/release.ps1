@@ -365,20 +365,24 @@ if ($NotesFile) {
     $notes = [IO.File]::ReadAllText((Resolve-Path $NotesFile), [Text.Encoding]::UTF8)
     Say "  [notes] 用 $NotesFile" 'Green'
 } else {
+    # 没有上一个 tag（或仓库提交不多）时不要拼 HEAD~15..HEAD —— 提交数不够会直接 fatal
     if ($compareBase) {
-        $logRange = "$compareBase..HEAD"
+        $lines = & git log --pretty=format:'- %s' "$compareBase..HEAD"
+        $compareLine = "**完整对比**：https://github.com/$RepoSlug/compare/$compareBase...$tag"
     } else {
-        $logRange = 'HEAD~15..HEAD'
+        $lines = & git log -n 15 --pretty=format:'- %s'
+        $compareLine = ''
     }
-    $lines = & git log --pretty=format:'- %s' $logRange
     $notes = @"
 ## 变更
 
 $($lines -join "`n")
 
-**完整对比**：https://github.com/$RepoSlug/compare/$compareBase...$tag
+$compareLine
 "@
-    Say "  [notes] 按 git log 生成（$logRange）" 'Green'
+    $rangeLabel = '最近 15 条提交'
+    if ($compareBase) { $rangeLabel = "$compareBase..HEAD" }
+    Say "  [notes] 按 git log 生成（$rangeLabel）" 'Green'
 }
 
 # ── 5. 空跑到此为止 ───────────────────────────────────────────────────────
@@ -387,7 +391,11 @@ if ($DryRun) {
     Say ""
     Say "空跑结束，没发任何请求。将要执行：" 'Yellow'
     if ($tagExists) {
-        Say "  - tag $tag 已存在（正式跑需要 -Force）" 'Yellow'
+        if ($Force) {
+            Say "  - tag $tag 已存在，-Force：只更新说明与附件（不动 tag）" 'Yellow'
+        } else {
+            Say "  - tag $tag 已存在（正式跑需要 -Force，或先升版本号）" 'Yellow'
+        }
     } else {
         Say "  - git tag -a $tag / git push origin $tag"
     }
