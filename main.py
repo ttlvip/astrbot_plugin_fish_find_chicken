@@ -38,7 +38,9 @@ from .core import (
     search_image,
     sniff_mime,
 )
+from .core.browser import resolve_locale
 from .core.net import HttpError, normalize_proxy, proxy_host
+
 
 PLUGIN_NAME = "astrbot_plugin_fish_find_chicken"
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -101,6 +103,11 @@ class FishFindChicken(Star):
             f"[鱼鱼找鸡] 引擎：{','.join(settings.engines)}；代理：{proxy_text}；"
             f"超时：{settings.timeout_sec}s"
         )
+        if settings.browser_region:
+            logger.info(
+                f"[鱼鱼找鸡] 浏览器地区对齐：{settings.browser_region}"
+                "（时区/语言跟随出口 IP，减少「容器时区 + 出口 IP」互相矛盾）"
+            )
 
         if settings.lens_enabled:
             try:
@@ -294,6 +301,16 @@ class FishFindChicken(Star):
         if settings.proxy:
             reachable = await self._probe_google(settings.proxy)
             lines.append(f"谷歌连通性：{'通' if reachable else '不通（Lens 会失败）'}")
+
+        # 地区对齐：这行是「被验证码挡住」时最先要看的东西之一
+        if settings.browser_region:
+            try:
+                loc = await resolve_locale(settings.browser_region, settings.proxy)
+                lines.append(f"地区对齐：{settings.browser_region} → {loc.describe()}")
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"地区对齐：{settings.browser_region}（解析失败：{exc}）")
+        else:
+            lines.append("地区对齐：未开启（browser_region 留空，保持 zh-CN + 容器时区）")
 
         lines.append(f"超时：{settings.timeout_sec} 秒/引擎；配额：单人 {settings.per_user_day} 次/天")
         lines.append(f"状态文件：{self._data_dir() / 'state.json'}")

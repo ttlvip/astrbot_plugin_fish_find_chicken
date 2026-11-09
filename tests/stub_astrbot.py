@@ -17,15 +17,23 @@ _LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
 
 class _StubLogger:
-    """模拟 AstrBot 的 logger（loguru）：占位符是 `{}` 而不是 `%s`。
+    """模拟 AstrBot v4.29.4+ 的 `astrbot.api.logger`。
 
-    插件里所有日志都必须走 `from astrbot.api import logger`，所以桩也得按 loguru 的
-    调用约定来 —— 否则 `logger.info("注入 {} 个", n)` 在测试里看不出问题，到真机上
-    才发现占位符对不上。
+    **这里以前写错了，写成了 loguru 语义，所以测试一直在放绿灯。** 从 4.29.4 起
+    `astrbot.api.logger` 是一个代理对象，按调用方模块解析出**标准库**
+    `logging.Logger`（`astrbot.plugin.<插件名>`），格式化规则是 `%s` / `%(name)s`，
+    不是 loguru 的 `{}`。所以：
 
-    这里刻意**不用内置 logging**：审查规定插件内不得出现 `import logging`，
-    测试桩也算插件的一部分，不留这个口子。默认只把 WARNING 以上打到 stderr
-    （和 stdlib 默认行为一致），需要看 DEBUG 就设 `FISH_STUB_LOG=DEBUG`。
+        logger.info("就绪（pid={}）", pid)      # ← 会炸
+        TypeError: not all arguments converted during string formatting
+
+    桩必须按标准库语义渲染，而且**不能悄悄吞掉格式化错误** —— 真机上这个异常会从
+    日志 channel 冒出来打断业务流程（issue #1 就是这个），桩要是兜住了，测试就永远
+    发现不了。插件里的正确写法是 f-string：不多传参数，两套语义都安全。
+
+    默认只把 WARNING 以上打到 stderr（和 stdlib 默认行为一致），要看 DEBUG 就设
+    FISH_STUB_LOG=DEBUG。桩刻意不直接 `import logging`：仓库有一条审查规则，
+    插件内（含测试）不许出现内置 logging，免得哪天又悄悄绕回去。
     """
 
     def __init__(self, name: str = "astrbot_stub"):
@@ -36,14 +44,17 @@ class _StubLogger:
 
     @staticmethod
     def _render(message, args, kwargs) -> str:
+        """按标准库 logging 的规则渲染：有 args 才做 `%` 插值，没有就原样返回。
+
+        注意这里**不捕获** TypeError —— 真机上日志格式化失败确实会把流程打断，
+        测试里也必须能看见。
+        """
         text = str(message)
         if not args and not kwargs:
             return text
-        try:
-            return text.format(*args, **kwargs)
-        except (IndexError, KeyError, ValueError):
-            # 日志绝不能把业务打崩；占位符写错了就把参数原样附在后面
-            return f"{text} {args if args else ''}".rstrip()
+        if kwargs and not args:
+            return text % kwargs
+        return text % args
 
     def _emit(self, level: str, message, args, kwargs) -> None:
         if _LEVELS.get(level, 0) < self.threshold:

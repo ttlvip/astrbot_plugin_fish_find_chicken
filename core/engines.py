@@ -341,6 +341,7 @@ async def reverse_search(
                     timeout=max(timeout, 45.0),
                     max_resolve=settings.lens_max_resolve,
                     headless=settings.browser_headless,
+                    region=settings.browser_region,
                     profile_dir=settings.browser_profile,
                     cdp_url=settings.browser_cdp,
                     cdp_insecure=settings.browser_cdp_insecure,

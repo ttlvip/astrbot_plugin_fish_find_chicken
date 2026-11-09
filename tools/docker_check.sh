@@ -56,7 +56,7 @@ PYJSON
 }
 
 # ── 1. 插件本体 ────────────────────────────────────────────────────────────
-head_ "1/5 插件文件"
+head_ "1/6 插件文件"
 if [ -f "$PLUGIN_DIR/main.py" ] && [ -f "$PLUGIN_DIR/core/lens.py" ]; then
     ver=$(grep -E '^version:' "$PLUGIN_DIR/metadata.yaml" 2>/dev/null | head -1 | awk '{print $2}')
     ok "插件在 $PLUGIN_DIR（version=${ver:-未知}）"
@@ -74,7 +74,7 @@ else
 fi
 
 # ── 2. 浏览器 ──────────────────────────────────────────────────────────────
-head_ "2/5 浏览器（Lens 必需）"
+head_ "2/6 浏览器（Lens 必需）"
 
 # 插件有两种拿浏览器的路径：本地可执行文件，或连独立跑的 Chrome（browser_cdp）。
 if [ -z "$CDP" ] && [ -f "$PLUGIN_CFG" ]; then
@@ -150,7 +150,7 @@ PYCDP
 fi
 
 # ── 3. 代理 ────────────────────────────────────────────────────────────────
-head_ "3/5 代理与谷歌连通性"
+head_ "3/6 代理与谷歌连通性"
 if [ -z "$PROXY" ]; then
     PROXY="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
 fi
@@ -196,7 +196,7 @@ if [ -n "$PROXY" ]; then
 fi
 
 # ── 4. 数据目录 ────────────────────────────────────────────────────────────
-head_ "4/5 数据目录"
+head_ "4/6 数据目录"
 mkdir -p "$DATA_DIR" 2>/dev/null || true
 if touch "$DATA_DIR/.write_test" 2>/dev/null; then
     rm -f "$DATA_DIR/.write_test"
@@ -205,8 +205,43 @@ else
     bad "$DATA_DIR 不可写 —— data 卷可能是 :ro 或权限不对，配额/缓存/浏览器 profile 都会失败"
 fi
 
-# ── 5. 汇总 ────────────────────────────────────────────────────────────────
-head_ "汇总"
+# ── 5. 环境一致性：时区 / 字体 ──────────────────────────────────────────────
+# 这一节全是 WARN：不装也能跑，但会让「这台机器是真人」的可信度下降。
+# 谷歌的判定里，时区语言自相矛盾、canvas 指纹不对劲，比 navigator.webdriver 还显眼。
+head_ "5/6 环境一致性（时区 / 字体）"
+
+sys_tz=$( (cat /etc/timezone 2>/dev/null || true) | head -1 )
+[ -z "$sys_tz" ] && sys_tz="${TZ:-未设置（多半是 UTC）}"
+printf '  容器时区：%s\n' "$sys_tz"
+if [ -f "$PLUGIN_CFG" ]; then
+    region=$(json_field "$PLUGIN_CFG" "browser_region")
+    if [ -n "$region" ]; then
+        ok "browser_region = $region（浏览器时区/语言会跟着出口对齐）"
+    else
+        meh "browser_region 没开 —— 容器时区 $sys_tz 与出口 IP 若不同地区，就是一个矛盾信号"
+        printf '         出口在别的地区就填 auto：插件会按出口 IP 对齐时区、Accept-Language、navigator.languages\n'
+    fi
+fi
+
+if command -v fc-list >/dev/null 2>&1; then
+    font_total=$(fc-list 2>/dev/null | wc -l | tr -d ' ')
+    font_cjk=$(fc-list :lang=zh 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${font_total:-0}" -lt 10 ]; then
+        meh "系统字体只有 ${font_total:-0} 个 —— 页面的 measureText/canvas 指纹会和真机差一截"
+        printf '         apt-get install -y --no-install-recommends fonts-liberation fonts-noto-cjk\n'
+    elif [ "${font_cjk:-0}" -eq 0 ]; then
+        meh "有 $font_total 个字体但没有中文字体（fc-list :lang=zh 为空）"
+        printf '         apt-get install -y --no-install-recommends fonts-wqy-zenhei fonts-noto-cjk\n'
+    else
+        ok "字体：$font_total 个（其中中文 $font_cjk 个）"
+    fi
+else
+    meh "没有 fontconfig（fc-list 不可用），基本等于容器里没装字体：canvas 指纹会明显异常"
+    printf '         apt-get install -y --no-install-recommends fontconfig fonts-liberation fonts-noto-cjk\n'
+fi
+
+# ── 6. 汇总 ────────────────────────────────────────────────────────────────
+head_ "6/6 汇总"
 printf '  PASS %d   FAIL %d   WARN %d\n' "$pass" "$fail" "$warn"
 if [ "$fail" -eq 0 ]; then
     printf '\n  \033[32m核心能力可用\033[0m：在群里引用一张图发 /鱼鱼找鸡 就能试；再发 /找鸡自检 复核插件侧状态。\n'

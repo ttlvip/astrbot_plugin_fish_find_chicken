@@ -154,6 +154,54 @@ class PlaywrightDiscoveryTest(unittest.TestCase):
             found = playwright_browser_candidates()
         self.assertIn(str(exe), found)
 
+    def test_new_layout_linux64(self):
+        """issue #2：新版 Playwright 的内层目录叫 `chrome-linux64`，不是 `chrome-linux`。"""
+        from unittest.mock import patch
+
+        from core.browser import playwright_browser_candidates
+
+        exe = self._make("chromium-1248", "chrome-linux64/chrome")
+        with patch.dict("os.environ", {"PLAYWRIGHT_BROWSERS_PATH": str(self.root)}):
+            found = playwright_browser_candidates()
+        self.assertIn(str(exe), found)
+
+    def test_new_layout_windows64_and_macos_arch(self):
+        """新版 Windows 是 `chrome-win64`，macOS 带 arm64 / x64 后缀。"""
+        from unittest.mock import patch
+
+        from core.browser import playwright_browser_candidates
+
+        win = self._make("chromium-1248", "chrome-win64/chrome.exe")
+        mac_arm = self._make(
+            "chromium-1250", "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium"
+        )
+        mac_x64 = self._make(
+            "chromium-1250", "chrome-mac-x64/Chromium.app/Contents/MacOS/Chromium"
+        )
+        with patch.dict("os.environ", {"PLAYWRIGHT_BROWSERS_PATH": str(self.root)}):
+            found = playwright_browser_candidates()
+        for exe in (win, mac_arm, mac_x64):
+            self.assertIn(str(exe), found)
+
+    def test_new_layout_headless_shell(self):
+        """新版 headless shell 目录和文件名都变了，两个新名字都要认。"""
+        from unittest.mock import patch
+
+        from core.browser import playwright_browser_candidates
+
+        shell = self._make(
+            "chromium_headless_shell-1248",
+            "chrome-headless-shell-linux64/chrome-headless-shell",
+        )
+        win_shell = self._make(
+            "chromium_headless_shell-1248",
+            "chrome-headless-shell-win64/chrome-headless-shell.exe",
+        )
+        with patch.dict("os.environ", {"PLAYWRIGHT_BROWSERS_PATH": str(self.root)}):
+            found = playwright_browser_candidates()
+        for exe in (shell, win_shell):
+            self.assertIn(str(exe), found)
+
     def test_headless_shell_not_given_headless_flag(self):
         """headless_shell 天生无头，多传 --headless=new 会让它直接退出。"""
         from core.browser import _build_args, _is_headless_shell

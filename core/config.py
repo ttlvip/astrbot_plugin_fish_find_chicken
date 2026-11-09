@@ -75,6 +75,7 @@ class Settings:
 
     browser_exe: str = ""
     browser_headless: bool = True
+    browser_region: str = ""
     browser_profile: str = ""
     browser_cdp: str = ""
     browser_cdp_insecure: bool = False
@@ -141,6 +142,8 @@ class Settings:
             use_astrbot_proxy=use_global,
             browser_exe=str(cfg.get("browser_exe") or "").strip(),
             browser_headless=_as_bool(cfg.get("browser_headless"), True),
+            # 时区/语言对齐：留空 = 不改；auto = 按出口 IP；也接受 us/jp/hk 这类国家码
+            browser_region=str(cfg.get("browser_region") or "").strip(),
             browser_profile=str(cfg.get("browser_profile") or "").strip(),
             browser_cdp=str(cfg.get("browser_cdp") or "").strip(),
             browser_cdp_insecure=_as_bool(cfg.get("browser_cdp_insecure"), False),

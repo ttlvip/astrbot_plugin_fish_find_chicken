@@ -262,6 +262,7 @@ async def lens_search(
     timeout: float = 45.0,
     max_resolve: int = 10,
     headless: bool = True,
+    region: str = "",
     on_log: Callable[[str], None] | None = None,
 ) -> list[dict]:
     """拿一张图去谷歌 Lens 搜，返回候选来源列表（已按「社交优先」排序、按 URL 去重）。
@@ -295,6 +296,7 @@ async def lens_search(
                     headless=headless,
                     cdp_url=cdp_url,
                     cdp_insecure=cdp_insecure,
+                    region=region,
                 ),
                 min(35.0, timeout + 5),
             )
@@ -1001,7 +1003,7 @@ def _as_lens_error(exc: BrowserError) -> LensError:
 
 def _make_logger(on_log: Callable[[str], None] | None) -> Callable[[str], None]:
     def log(line: str) -> None:
-        logger.debug("lens: {}", line)
+        logger.debug(f"lens: {line}")
         if on_log is None:
             return
         try:

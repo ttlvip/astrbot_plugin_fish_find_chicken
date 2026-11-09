@@ -74,6 +74,12 @@
     "default": true,
     "hint": "默认无头；如果谷歌一直不给结果，可以试着关掉（窗口会被放到屏幕外）。"
   },
+  "browser_region": {
+    "type": "string",
+    "description": "浏览器时区/语言对齐出口地区（降低人机验证）",
+    "default": "",
+    "hint": "填 auto = 按代理出口 IP 自动对齐时区、Accept-Language、navigator.languages（推荐）；也可手填国家码 us / jp / hk / sg / tw / kr / de / gb 等。留空 = 不改，保持 zh-CN 和容器时区（老行为）。Docker 里最常见的破绽不是无头本身，而是「容器时区 + Chrome 语言 + 出口 IP」三处互相矛盾。auto 会向 ipinfo.io 发一次查询（走代理，结果缓存 6 小时），查不到就退回默认值。"
+  },
   "browser_profile": {
     "type": "string",
     "description": "浏览器 profile 目录（固定后能复用 cookie）",

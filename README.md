@@ -2,6 +2,28 @@
 
 给一张图，反查这人是哪个 coser、账号在哪。
 
+> **⚠️ 请先读这段：本项目代码完全由 AI 生成**
+> 
+> 这个仓库里的**全部代码、注释、测试和这份 README，都是 AI 写的**。业务规则来自原项目，
+> 但每一行实现、每一个边界判断、每一条测试断言，都是 AI 在对话里生成后直接提交的，
+> **没有经过专业工程师逐行审阅**。
+> 
+> 它能跑，测试也是绿的 —— 但**绿不代表对**。AI 会写出「看起来合理、实际是错的」的错误处理，
+> 会漏掉真实环境里的异常路径，也会在你升级 AstrBot、Playwright 或浏览器之后悄悄失效。
+> 
+> 
+> **风险提示，并自行承担风险。** 尤其注意：
+> 
+> * 插件会把图片**上传到谷歌 Lens / SauceNAO / trace.moe / IQDB 等第三方服务**，
+>   请确认你的使用场景允许这么做；
+> * 它会启动无头浏览器、读写本地 profile、带着你的代理出口去访问谷歌，
+>   行为可能触发谷歌的风控（人机验证、临时封 IP）；
+> * 部署在对外服务的机器人上时，请先自行评估合规、隐私与配额风险。
+> 
+> 发现问题欢迎提 issue，但请把它当成「AI 写的玩具」，而不是「有质保的产品」。
+
+---
+
 > **一句话原理**：把图交给谷歌 Lens 反查原帖，从结果里抽社交媒体账号（X / 微博 / B站 / Instagram / 小红书），
 > 再用 SauceNAO / trace.moe / IQDB 补充动漫图和动画截图的场景。不调用任何大模型，零 token。
 
@@ -41,11 +63,11 @@
 
 ## 二、装之前
 
-| 需要 | 说明 |
-|---|---|
-| AstrBot ≥ 4.5 | — |
-| Chrome / Chromium / Edge | 只为了 Lens。Windows/macOS 装个浏览器就有；Docker 里 `apt install chromium`；**已经装了 playwright 的话，它自带的 chromium 会被自动识别，不用另装** |
-| 能访问谷歌的代理 | 填在 AstrBot 的 `http_proxy`（设置 → 其他）里最省事，插件会复用 |
+| 需要                       | 说明                                                                                                                                                                                                                     |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AstrBot ≥ 4.5            | —                                                                                                                                                                                                                      |
+| Chrome / Chromium / Edge | 只为了 Lens。Windows/macOS 装个浏览器就有；Docker 里 `apt install chromium`；**已经装了 playwright 的话，它自带的 chromium 会被自动识别，不用另装**（新旧目录布局都认：`chrome-linux` / `chrome-linux64`、`chrome-win` / `chrome-win64`、`chrome-mac-arm64` 等，0.1.2 起） |
+| 能访问谷歌的代理                 | 填在 AstrBot 的 `http_proxy`（设置 → 其他）里最省事，插件会复用                                                                                                                                                                           |
 
 ## 三、安装
 
@@ -63,13 +85,13 @@ git clone https://github.com/ttlvip/astrbot_plugin_fish_find_chicken.git
 
 ## 四、指令
 
-| 指令 | 说明 |
-|---|---|
-| `/鱼鱼找鸡` | 反查：引用一张带图的消息，或图跟指令一起发 |
-| `/鱼鱼找鸡 <图片网址>` | 直接给图片链接 |
-| `/鱼鱼找鸡 帮助` | 用法 |
-| `/找鸡自检` | 管理员：看浏览器、代理连通性、引擎、配额 |
-| `/找鸡重置浏览器` | 管理员：清掉浏览器 profile（被谷歌标记、或换代理后建议清一次） |
+| 指令             | 说明                                  |
+| -------------- | ----------------------------------- |
+| `/鱼鱼找鸡`        | 反查：引用一张带图的消息，或图跟指令一起发               |
+| `/鱼鱼找鸡 <图片网址>` | 直接给图片链接                             |
+| `/鱼鱼找鸡 帮助`     | 用法                                  |
+| `/找鸡自检`        | 管理员：看浏览器、代理连通性、引擎、配额                |
+| `/找鸡重置浏览器`     | 管理员：清掉浏览器 profile（被谷歌标记、或换代理后建议清一次） |
 
 别名：`/找鸡`、`/coser`、`/反查`。
 
@@ -91,14 +113,14 @@ git clone https://github.com/ttlvip/astrbot_plugin_fish_find_chicken.git
 
 **每条结果里的两个链接是分工的**，别混着看：
 
-| 字段 | 含义 | 用途 |
-|---|---|---|
-| `url` / `profileUrl` | 账号主页（`x.com/<id>`、`weibo.com/u/<uid>`、`space.bilibili.com/<mid>`…） | 认人、看这个人的全部作品、判断是不是同一个人 |
-| `matchUrl` | 与图片内容最相关的那条**具体页面**（某条推文 `/status/…`、微博正文、pixiv `/artworks/…`、小红书笔记） | 直接核对「这张图是不是他发的」，一次点到位 |
-| `matchTitle` | 上面那条链接的标题（原帖文案 / 作品名） | 让人不点开也能判断有没有找对 |
-| `matchHost` | 该页面所在域名 | 一眼看出落在哪个站 |
-| `matchUrls` | 同上前 3 条，按相关性排序 | 备查（回话里只展示最高的那条，避免刷屏） |
-| `matchUrl` 为空 | 引擎只翻到主页，没有比主页更具体的页面 | 回话里会写「只翻到主页」，不拿主页凑数 |
+| 字段                   | 含义                                                                   | 用途                     |
+| -------------------- | -------------------------------------------------------------------- | ---------------------- |
+| `url` / `profileUrl` | 账号主页（`x.com/<id>`、`weibo.com/u/<uid>`、`space.bilibili.com/<mid>`…）   | 认人、看这个人的全部作品、判断是不是同一个人 |
+| `matchUrl`           | 与图片内容最相关的那条**具体页面**（某条推文 `/status/…`、微博正文、pixiv `/artworks/…`、小红书笔记） | 直接核对「这张图是不是他发的」，一次点到位  |
+| `matchTitle`         | 上面那条链接的标题（原帖文案 / 作品名）                                                | 让人不点开也能判断有没有找对         |
+| `matchHost`          | 该页面所在域名                                                              | 一眼看出落在哪个站              |
+| `matchUrls`          | 同上前 3 条，按相关性排序                                                       | 备查（回话里只展示最高的那条，避免刷屏）   |
+| `matchUrl` 为空        | 引擎只翻到主页，没有比主页更具体的页面                                                  | 回话里会写「只翻到主页」，不拿主页凑数    |
 
 > 抽取账号时一律把链接收敛到主页（人问的是「号在哪」），但「这张图的出处」如果丢了，
 > 用户还得自己去时间线上翻 —— 所以每条账号都会把最相关的那条具体链接一起带上。
@@ -119,38 +141,39 @@ git clone https://github.com/ttlvip/astrbot_plugin_fish_find_chicken.git
 
 ## 五、配置（WebUI 里改）
 
-| 配置 | 默认 | 说明 |
-|---|---|---|
-| `engines` | `lens,saucenao,tracemoe` | 想关掉某个就删掉；`iqdb` 可加 |
-| `serpapi_enabled` | 关 | 开 = 用 SerpApi 查 Lens，不启动浏览器、不会撞人机验证 |
-| `serpapi_api_key` | 空 | SerpApi 的 key。**开关开着但 key 为空 = 自动回退本地浏览器** |
-| `proxy` | 空 | 留空 = 用 AstrBot 全局 `http_proxy` |
-| `use_astrbot_proxy` | 开 | 关掉就只用插件自己的 `proxy` 或环境变量 |
-| `browser_exe` | 空 | 留空自动探测：PATH 里的 chrome/chromium/edge → **playwright 的 `ms-playwright` 缓存** → 常见安装路径。Docker 里一般不用填 |
-| `browser_headless` | 开 | 谷歌一直不给结果时可以关掉试试（窗口移到屏幕外） |
-| `browser_profile` | 空 | 留空 = `data/plugin_data/astrbot_plugin_fish_find_chicken/browser_profile`。**建议留着**：谷歌把「已通过验证」记在 cookie 里，固定 profile 能明显降低人机验证概率、冷启动也更快 |
-| `browser_cdp` | 空 | 填 `http://chrome:9222` 就连独立跑的 Chrome，不本地启动（Docker 场景见第六节） |
-| `browser_cdp_insecure` | 关 | CDP 地址是 `https://` 且自签证书时打开（内网反代常见）；`http://` 不需要 |
-| `lens_max_resolve` | 10 | Lens 解析多少条结果；社交平台优先，每条约 1~3 秒 |
-| `strict_consensus` | 开 | 名字对不上主轴的号一律不报（宁缺毋滥） |
-| `timeout_sec` | 45 | 单引擎超时 |
-| `max_accounts` | 3 | 最多报几个号 |
-| `cooldown_sec` / `per_user_day` / `global_day` | 30 / 20 / 100 | 冷却与每日配额（管理员不受限） |
-| `cache_days` | 30 | 同一张图再查直接给缓存，不扣次数 |
-| `found_image` | 空 | 命中时附带的那张「已找到」图（路径或网址） |
-| `group_whitelist` / `group_blacklist` | 空 | 按群开关 |
+| 配置                                             | 默认                       | 说明                                                                                                                                    |
+| ---------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `engines`                                      | `lens,saucenao,tracemoe` | 想关掉某个就删掉；`iqdb` 可加                                                                                                                    |
+| `serpapi_enabled`                              | 关                        | 开 = 用 SerpApi 查 Lens，不启动浏览器、不会撞人机验证                                                                                                   |
+| `serpapi_api_key`                              | 空                        | SerpApi 的 key。**开关开着但 key 为空 = 自动回退本地浏览器**                                                                                            |
+| `proxy`                                        | 空                        | 留空 = 用 AstrBot 全局 `http_proxy`                                                                                                        |
+| `use_astrbot_proxy`                            | 开                        | 关掉就只用插件自己的 `proxy` 或环境变量                                                                                                              |
+| `browser_exe`                                  | 空                        | 留空自动探测：PATH 里的 chrome/chromium/edge → **playwright 的 `ms-playwright` 缓存** → 常见安装路径。Docker 里一般不用填                                      |
+| `browser_headless`                             | 开                        | 谷歌一直不给结果时可以关掉试试（窗口移到屏幕外）                                                                                                              |
+| `browser_region`                               | 空                        | 时区/语言对齐出口地区：`auto` = 按代理出口 IP 自动对齐（推荐）；也可填 `us` / `jp` / `hk` 等国家码；留空 = 保持 zh-CN + 容器时区。详见第九节                                                                                      |
+| `browser_profile`                              | 空                        | 留空 = `data/plugin_data/astrbot_plugin_fish_find_chicken/browser_profile`。**建议留着**：谷歌把「已通过验证」记在 cookie 里，固定 profile 能明显降低人机验证概率、冷启动也更快 |
+| `browser_cdp`                                  | 空                        | 填 `http://chrome:9222` 就连独立跑的 Chrome，不本地启动（Docker 场景见第六节）                                                                             |
+| `browser_cdp_insecure`                         | 关                        | CDP 地址是 `https://` 且自签证书时打开（内网反代常见）；`http://` 不需要                                                                                     |
+| `lens_max_resolve`                             | 10                       | Lens 解析多少条结果；社交平台优先，每条约 1~3 秒                                                                                                         |
+| `strict_consensus`                             | 开                        | 名字对不上主轴的号一律不报（宁缺毋滥）                                                                                                                   |
+| `timeout_sec`                                  | 45                       | 单引擎超时                                                                                                                                 |
+| `max_accounts`                                 | 3                        | 最多报几个号                                                                                                                                |
+| `cooldown_sec` / `per_user_day` / `global_day` | 30 / 20 / 100            | 冷却与每日配额（管理员不受限）                                                                                                                       |
+| `cache_days`                                   | 30                       | 同一张图再查直接给缓存，不扣次数                                                                                                                      |
+| `found_image`                                  | 空                        | 命中时附带的那张「已找到」图（路径或网址）                                                                                                                 |
+| `group_whitelist` / `group_blacklist`          | 空                        | 按群开关                                                                                                                                  |
 
 **调优建议**：Lens 慢主要慢在「解析链接」。群里只想要个大概就把 `lens_max_resolve` 调到 6；
 想让「查全」就调到 14。冷启动那 1~2 秒只发生一次，浏览器是进程内单例，后续查询复用。
 
 **实测耗时**（Windows + Edge 141 + 香港出口，真人 coser 图）：
 
-| 阶段 | 耗时 |
-|---|---|
-| 浏览器冷启动 | 0.8 ~ 2.3 秒（只发生一次，后续查询复用） |
-| 上传图片 → 结果页出卡片 | 5 ~ 8 秒 |
+| 阶段                               | 耗时                                                     |
+| -------------------------------- | ------------------------------------------------------ |
+| 浏览器冷启动                           | 0.8 ~ 2.3 秒（只发生一次，后续查询复用）                              |
+| 上传图片 → 结果页出卡片                    | 5 ~ 8 秒                                                |
 | 解析 10 条结果链接（HTTP 直读 302，失败退回标签页） | 干净 IP + 热 profile：6 秒内 10/10；冷启动或被限流时 8 ~ 14 秒、6 ~ 8 条 |
-| 一次查询总计 | **9 ~ 27 秒** |
+| 一次查询总计                           | **9 ~ 27 秒**                                           |
 
 如果连续搜索把谷歌惹毛了（返回「正在验证您的请求」的节流页），插件会等 2 秒替它重试一次；
 **撞到第 2 条节流页就停止解析剩余的，用手上已有的结果回话** —— 越敲越紧，硬刚只会升级成人机验证。
@@ -159,11 +182,11 @@ git clone https://github.com/ttlvip/astrbot_plugin_fish_find_chicken.git
 
 Docker 里能不能用，只取决于三件事（和代码无关）：
 
-| 条件 | 不满足的后果 | 怎么补 |
-|---|---|---|
-| 容器能拿到 Chrome | **「图片 → X 账号」直接不可用**（只剩 SauceNAO 这类兜底） | 装进 AstrBot 镜像，**或**另起一个 Chrome 容器（见下两节） |
-| 容器能访问谷歌 | Lens 报「谷歌连不上」，同上 | 给容器 / 给那个 Chrome 配 `http_proxy`（别写容器自己的 `127.0.0.1`） |
-| `/AstrBot/data` 可写 | 配额/缓存/浏览器 profile 全失败 | 别用 `:ro` 挂载 |
+| 条件                 | 不满足的后果                                 | 怎么补                                                  |
+| ------------------ | -------------------------------------- | ---------------------------------------------------- |
+| 容器能拿到 Chrome       | **「图片 → X 账号」直接不可用**（只剩 SauceNAO 这类兜底） | 装进 AstrBot 镜像，**或**另起一个 Chrome 容器（见下两节）              |
+| 容器能访问谷歌            | Lens 报「谷歌连不上」，同上                       | 给容器 / 给那个 Chrome 配 `http_proxy`（别写容器自己的 `127.0.0.1`） |
+| `/AstrBot/data` 可写 | 配额/缓存/浏览器 profile 全失败                  | 别用 `:ro` 挂载                                          |
 
 官方镜像 `soulter/astrbot:latest` = `python:3.12-slim`，**没有装任何浏览器**。
 你有两条路：装进 AstrBot 容器（简单），或单独跑一个 Chrome 容器（干净、可复用）。
@@ -175,7 +198,8 @@ docker exec -it astrbot bash /AstrBot/data/plugins/astrbot_plugin_fish_find_chic
 ```
 
 它会依次检查：插件文件与版本 → aiohttp → 浏览器（本地启动会真启动一次并让 CDP 读 UA；
-配了外部 CDP 则直接探 `/json/version`）→ 代理与谷歌连通性 → data 目录可写，最后给 PASS/FAIL 汇总。
+配了外部 CDP 则直接探 `/json/version`）→ 代理与谷歌连通性 → data 目录可写 →
+环境一致性（容器时区、`browser_region`、字体/中文体），最后给 PASS/FAIL 汇总。
 
 ### 方案 A：把 chromium 装进 AstrBot 镜像
 
@@ -185,9 +209,14 @@ docker exec -it astrbot bash /AstrBot/data/plugins/astrbot_plugin_fish_find_chic
 FROM soulter/astrbot:latest
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium \
+    && apt-get install -y --no-install-recommends \
+         chromium fonts-liberation fonts-wqy-zenhei fonts-noto-cjk \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 ```
+
+字体不是「好看」的问题：容器里没字体时页面的 `measureText` / canvas 指纹和真机差一截，
+本身就是一处异常特征（自检脚本第 5 节会检查）。`chromium` 包给的是完整版，
+比 Playwright 的 `chromium_headless_shell` 强得多。
 
 compose 里把 `image:` 换成构建出来的镜像（约 +300MB）。插件会自动加 `--no-sandbox`
 和 `--disable-dev-shm-usage`（root + 小 `/dev/shm` 是容器里的经典坑），不需要你额外配参数。
@@ -261,10 +290,10 @@ AstrBot 镜像保持官方镜像（便于随时升级）→ 方案 B。
 
 ### 代理：容器里的 `127.0.0.1` 不是宿主机
 
-| 拓扑 | 代理怎么写 | 注意 |
-|---|---|---|
-| `network_mode: host` | `http://127.0.0.1:7890` | 最简单；端口不再隔离 |
-| 桥接 + 宿主机局域网 IP | `http://<宿主机IP>:7890` | Clash 需开「允许局域网连接」(allow-lan)，否则只监听回环 |
+| 拓扑                          | 代理怎么写                              | 注意                                                            |
+| --------------------------- | ---------------------------------- | ------------------------------------------------------------- |
+| `network_mode: host`        | `http://127.0.0.1:7890`            | 最简单；端口不再隔离                                                    |
+| 桥接 + 宿主机局域网 IP              | `http://<宿主机IP>:7890`              | Clash 需开「允许局域网连接」(allow-lan)，否则只监听回环                          |
 | 桥接 + `host.docker.internal` | `http://host.docker.internal:7890` | Linux 要加 `extra_hosts: ["host.docker.internal:host-gateway"]` |
 
 > `<宿主机IP>` 换成你自己的局域网地址（`192.168.x.x` / `10.x.x.x`），端口 `7890` 也按你的
@@ -280,6 +309,29 @@ docker exec -it astrbot curl -sS -o /dev/null -w "%{http_code}\n" --max-time 12 
 
 不需要为浏览器调试端口配 `no_proxy`：插件对 CDP 的探测是显式直连的（`trust_env=False`）。
 另外 Chrome 的 `--proxy-server` 不支持带账号密码的代理 URL，需要认证的代理要在代理端放开。
+
+### 时区与语言：别让容器和出口互相打架
+
+容器默认时区常常是 UTC（或你写死的 `Asia/Shanghai`），而代理出口可能在美西、日本、香港。
+Chrome 又会用 `en-US` 作为默认语言 —— 三个信号互相矛盾，比「无头」更容易被判定成机器人。
+
+只要一行配置：
+
+```
+browser_region = auto
+```
+
+插件会走代理问一次 IP 归属地（`ipinfo.io`，失败自动换 `ipapi.co`，结果缓存 6 小时），然后把
+
+| 信号 | 怎么改 |
+| --- | --- |
+| JS 侧时区（`Date` / `Intl`） | CDP `Emulation.setTimezoneOverride`，外部 Chrome 容器同样生效 |
+| 请求头 `Accept-Language` | `Emulation.setUserAgentOverride` 的 `acceptLanguage` |
+| `navigator.languages` | 注入脚本里按地区生成（`ja-JP` → `ja-JP, ja, en`） |
+| 浏览器 UI 语言 | 启动参数 `--lang` / `--accept-lang` |
+
+也可以直接写国家码（`us` / `jp` / `hk` / `sg` / `tw` / `kr` / `de` / `gb` …），完全离线，不查 IP。
+留空 = 不改，保持老行为。`/找鸡自检` 会显示当前对齐到了什么。
 
 ## 七、目录结构
 
@@ -320,6 +372,7 @@ astrbot_plugin_fish_find_chicken/
 
 1. 去 serpapi.com 注册，Dashboard 里复制 API key
 2. 插件配置：
+   
    ```
    serpapi_enabled = true
    serpapi_api_key = 你的 key
@@ -328,11 +381,11 @@ astrbot_plugin_fish_find_chicken/
 
 ### 回退规则（严格按配置走，不会偷偷切换）
 
-| 配置状态 | 实际用的通道 |
-|---|---|
-| `serpapi_enabled = true` 且 key 非空 | **SerpApi**（不启动任何浏览器） |
+| 配置状态                              | 实际用的通道                                |
+| --------------------------------- | ------------------------------------- |
+| `serpapi_enabled = true` 且 key 非空 | **SerpApi**（不启动任何浏览器）                 |
 | `serpapi_enabled = true` 但 key 为空 | 本地浏览器，并在日志里警告「开了 SerpApi 但没填 key，已回退」 |
-| `serpapi_enabled = false` | 本地浏览器 / 外部 CDP，和以前完全一样 |
+| `serpapi_enabled = false`         | 本地浏览器 / 外部 CDP，和以前完全一样                |
 
 SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会自动降级到本地浏览器 —— 那样会掩盖
 「key 配错了」这类问题。失败原因会直接写进回话的「没出结果」里，比如「额度用完了（429）」。
@@ -357,13 +410,14 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 
 按有效性排序：
 
-| 手段 | 有效性 | 怎么做 |
-|---|---|---|
-| **换出口 IP** | 最高 | 机房 IP / 公共 VPN 的 IP 池几乎必然被拦；换家宽或住宅代理后基本不再出现。换 IP 后原来的 cookie 也失效，要一起换 |
-| **修正浏览器指纹** | 高（已内置） | 插件会自动做：覆盖 UA、抹掉 `navigator.webdriver`、补 `window.chrome` / `plugins` / `languages`、伪装 WebGL vendor。**Playwright 自带 Chromium 的默认 UA 里带 `HeadlessChrome`，这一步是必须的** |
-| **复用已验证会话** | 高 | 配 `google_cookie`：在你自己浏览器里过完验证后，从开发者工具复制 google.com 的 Cookie 头整串粘进来。注意反滥用 cookie 与出口 IP 绑定，换 IP 就无效 |
-| **降低频率** | 中 | `cooldown_sec` 调到 60、`per_user_day` 5、`global_day` 30。信誉是累积的，越刷越紧；撞到验证后插件会主动收手 |
-| **固定 profile + 人工过验证一次** | 中（仅本地浏览器模式） | 用 `browser_headless: false` 让窗口出现在屏幕外，人工点一次验证，cookie 就留在 `browser_profile` 里；外部浏览器模式则由那个浏览器的 profile 决定 |
+| 手段                       | 有效性         | 怎么做                                                                                                                                                             |
+| ------------------------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **换出口 IP**               | 最高          | 机房 IP / 公共 VPN 的 IP 池几乎必然被拦；换家宽或住宅代理后基本不再出现。换 IP 后原来的 cookie 也失效，要一起换                                                                                           |
+| **修正浏览器指纹**              | 高（已内置）      | 插件会自动做：覆盖 UA、抹掉 `navigator.webdriver`、补 `window.chrome` / `plugins` / `languages`、伪装 WebGL vendor。**Playwright 自带 Chromium 的默认 UA 里带 `HeadlessChrome`，这一步是必须的**。`navigator.plugins` 是带 `item`/`namedItem`/`refresh` 的类数组（不是裸数组），`pdfViewerEnabled` 也置为 true —— 形状不一致本身就是现成的检测点 |
+| **时区/语言对齐出口**            | 高（已内置，Docker 最明显） | 配 `browser_region: auto`。容器时区（常是 UTC 或 `Asia/Shanghai`）+ Chrome 默认 `en-US` + 出口在美西，这三处矛盾比「无头」更容易被识别。auto 会按出口 IP 把时区、`Accept-Language`、`navigator.languages` 一起改（`Date` 时区走 CDP 覆盖，外部 Chrome 容器同样生效）                                            |
+| **复用已验证会话**              | 高           | 配 `google_cookie`：在你自己浏览器里过完验证后，从开发者工具复制 google.com 的 Cookie 头整串粘进来。注意反滥用 cookie 与出口 IP 绑定，换 IP 就无效                                                             |
+| **降低频率**                 | 中           | `cooldown_sec` 调到 60、`per_user_day` 5、`global_day` 30。信誉是累积的，越刷越紧；撞到验证后插件会主动收手                                                                                  |
+| **固定 profile + 人工过验证一次** | 中（仅本地浏览器模式） | 用 `browser_headless: false` 让窗口出现在屏幕外，人工点一次验证，cookie 就留在 `browser_profile` 里；外部浏览器模式则由那个浏览器的 profile 决定                                                         |
 
 不建议做的事：接打码平台去解 reCAPTCHA。它对 Lens 这种「结果页本身也被判定」的场景基本没用
 （解完验证码，结果页照样可能是空壳），而且不稳定、有合规风险。
@@ -376,10 +430,17 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 1. 先确认浏览器是完整版而不是 headless_shell：`/找鸡自检` 里显示的路径应该形如
    `/ms-playwright/chromium-1091/chrome-linux/chrome`。看到 `chromium_headless_shell` 说明只有精简版，
    指纹更假、也更容易被拦 —— 跑一次 `playwright install chromium` 补上完整版。
-2. 还验证 → `/找鸡重置浏览器`。旧 profile 里可能存着「被标记」的 cookie，换指纹也没用，
+2. 跑一遍容器自检看「环境一致性」：
+   ```bash
+   docker exec -it astrbot bash /AstrBot/data/plugins/astrbot_plugin_fish_find_chicken/tools/docker_check.sh
+   ```
+   它会报字体数量、中文体有无、容器时区、以及 `browser_region` 有没有开。
+3. 容器时区和出口不同地区 → 配 `browser_region: auto`（或直接填国家码，如 `us`）；字体不足 →
+   按自检给出的 `apt-get install` 补 `fonts-liberation` / `fonts-noto-cjk`。
+4. 还验证 → `/找鸡重置浏览器`。旧 profile 里可能存着「被标记」的 cookie，换指纹也没用，
    清掉重新建立一个干净身份再试。
-3. 还验证 → 就是出口 IP 的问题。换家宽/住宅代理；换完记得再重置一次 profile。
-4. 仍不行 → 配 `google_cookie`（和当前出口同 IP 导出的），并把 `lens_max_resolve` 降到 6、冷却调到 60 秒。
+5. 还验证 → 就是出口 IP 的问题。换家宽/住宅代理；换完记得再重置一次 profile。
+6. 仍不行 → 配 `google_cookie`（和当前出口同 IP 导出的），并把 `lens_max_resolve` 降到 6、冷却调到 60 秒。
 
 > 想更进一步降低无头特征，可以让容器跑「有头 + Xvfb」：`apt install xvfb`，启动
 > `Xvfb :99 -screen 0 1440x1400x24 &`，设 `DISPLAY=:99`，再把 `browser_headless` 关掉。
@@ -387,13 +448,15 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 
 ## 十、已知限制
 
-* **Lens 会被人机验证挡**（这是谷歌的判定，不是插件故障，处理办法见第八节）。插件会自动重试一次、
+* **Lens 会被人机验证挡**（这是谷歌的判定，不是插件故障，处理办法见第九节）。插件会自动重试一次、
   然后收手，并把配额默认卡在「单人 20 次/天、全站 100 次/天」。自建机器人实测连续十几次查询就会触发。
 * **解析条数受配额影响**。`lens_max_resolve` 是上限，被限流时可能只解析出几条 —— 结果里会如实少报，不会编。
 * **只能找到「网上公开过」的图**。私聊原图、刚发的新图、被裁过/加过贴纸的图基本查不到，这是原理决定的。
 * **账号是「最可能」而不是「确定」**。名字共识能挡掉大部分误报，但最终请点开链接核对。
 * Pixiv 是画作平台，插件会把相似度 < 0.8 的 pixiv 结果直接丢掉 —— 画师的作品页不是 coser 的号。
 * 搜索结果受出口 IP 地域影响（代理在香港/日本/美国，结果会略有差异）。
+* **代码由 AI 生成、测试覆盖有限**（见开头声明）。测试只覆盖纯逻辑与离线路径，
+  真正的 Lens 反查、浏览器启动、人机验证这些必须在真机上跑的东西，基本上是测不到的。
 
 ## 十一、致谢与许可
 
@@ -415,4 +478,3 @@ SerpApi 调用**失败**时（key 无效、额度用尽、网络问题）不会�
 **许可**
 
 * 本项目采用 MIT 许可，全文见 [LICENSE](LICENSE)。
-

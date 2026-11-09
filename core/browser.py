@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 import time
 from pathlib import Path
@@ -36,10 +37,14 @@ from astrbot.api import logger
 __all__ = [
     "Browser",
     "BrowserError",
+    "Locale",
     "Tab",
     "close_browser",
     "find_browser_exe",
     "get_browser",
+    "locale_for_country",
+    "resolve_locale",
+    "stealth_js",
 ]
 
 # 用桌面版 Chrome 的 UA：headless 默认 UA 里带 "HeadlessChrome"，谷歌会直接给验证码。
@@ -51,6 +56,100 @@ USER_AGENT = (
 # navigator.webdriver 是最容易被识别的自动化指纹，抹成 undefined 成本极低。
 WEBDRIVER_PATCH = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
 
+# 默认语言：和 STEALTH_LANGUAGE 一致（没配 browser_region 时的老行为）
+DEFAULT_LANGUAGES: tuple[str, ...] = ("zh-CN", "zh", "en")
+
+# 国家码 →（默认时区, 语言）。
+#
+# 为什么需要这张表：谷歌的判定不只看「是不是无头」，还看这台机器自不自相矛盾。
+# Docker 里最常见的组合是「容器 TZ=Asia/Shanghai + Chrome 默认 en-US + 代理在美西」，
+# 三个信号互相打架，比 navigator.webdriver 还显眼。表里没有的国家按 en-US 处理 ——
+# 宁可给一个说得通的英语环境，也不要留着中英时区三处矛盾。
+_COUNTRY_LOCALE: dict[str, tuple[str, str]] = {
+    "CN": ("Asia/Shanghai", "zh-CN"),
+    "HK": ("Asia/Hong_Kong", "zh-HK"),
+    "TW": ("Asia/Taipei", "zh-TW"),
+    "MO": ("Asia/Macau", "zh-MO"),
+    "SG": ("Asia/Singapore", "en-SG"),
+    "JP": ("Asia/Tokyo", "ja-JP"),
+    "KR": ("Asia/Seoul", "ko-KR"),
+    "MY": ("Asia/Kuala_Lumpur", "en-MY"),
+    "TH": ("Asia/Bangkok", "th-TH"),
+    "VN": ("Asia/Ho_Chi_Minh", "vi-VN"),
+    "ID": ("Asia/Jakarta", "id-ID"),
+    "PH": ("Asia/Manila", "en-PH"),
+    "IN": ("Asia/Kolkata", "en-IN"),
+    "AE": ("Asia/Dubai", "ar-AE"),
+    "TR": ("Europe/Istanbul", "tr-TR"),
+    "RU": ("Europe/Moscow", "ru-RU"),
+    "DE": ("Europe/Berlin", "de-DE"),
+    "FR": ("Europe/Paris", "fr-FR"),
+    "GB": ("Europe/London", "en-GB"),
+    "UK": ("Europe/London", "en-GB"),
+    "NL": ("Europe/Amsterdam", "nl-NL"),
+    "ES": ("Europe/Madrid", "es-ES"),
+    "IT": ("Europe/Rome", "it-IT"),
+    "SE": ("Europe/Stockholm", "sv-SE"),
+    "CH": ("Europe/Zurich", "de-CH"),
+    "PL": ("Europe/Warsaw", "pl-PL"),
+    "CA": ("America/Toronto", "en-CA"),
+    "US": ("America/Los_Angeles", "en-US"),
+    "BR": ("America/Sao_Paulo", "pt-BR"),
+    "AU": ("Australia/Sydney", "en-AU"),
+    "NZ": ("Pacific/Auckland", "en-NZ"),
+}
+
+
+def _languages_for(lang: str) -> tuple[str, ...]:
+    """`ja-JP` → ``('ja-JP', 'ja', 'en')``：和真实 Chrome 的 navigator.languages 同形状。"""
+    lang = (lang or "").strip() or "en-US"
+    primary = lang.split("-")[0]
+    out = [lang]
+    if primary and primary != lang:
+        out.append(primary)
+    if primary != "en":
+        out.append("en")
+    return tuple(dict.fromkeys(out))
+
+
+@dataclass(frozen=True)
+class Locale:
+    """浏览器要「演」的地区：时区 + 语言。
+
+    ``timezone`` 为空表示不覆盖（跟随容器系统时区），保持老版本行为。
+    """
+
+    timezone: str = ""
+    languages: tuple[str, ...] = DEFAULT_LANGUAGES
+    source: str = ""
+
+    @property
+    def language(self) -> str:
+        return self.languages[0] if self.languages else "zh-CN"
+
+    @property
+    def accept_language(self) -> str:
+        """Accept-Language 头：主语言 + 语言短码 + en 兜底，权重递减。"""
+        parts = [self.language]
+        primary = self.language.split("-")[0]
+        if primary and primary != self.language:
+            parts.append(f"{primary};q=0.9")
+        if primary != "en":
+            parts.append("en;q=0.8")
+        return ",".join(parts)
+
+    @property
+    def active(self) -> bool:
+        """有没有真的改东西（决定要不要往启动参数里塞 --lang）。"""
+        return bool(self.timezone) or tuple(self.languages) != DEFAULT_LANGUAGES
+
+    def describe(self) -> str:
+        return f"时区 {self.timezone or '跟随容器'} / {self.language}"
+
+
+# 没配置 browser_region 时的默认值：语言中文、时区跟随容器（和 0.1.x 完全一致）
+DEFAULT_LOCALE = Locale(languages=DEFAULT_LANGUAGES, source="默认")
+
 # 更完整的「别像个机器人」补丁。
 #
 # 为什么需要：Playwright / Puppeteer 或无头 Chromium 会留下几个很容易被识别的痕迹 ——
@@ -58,30 +157,81 @@ WEBDRIVER_PATCH = "Object.defineProperty(navigator,'webdriver',{get:()=>undefine
 # WebGL renderer 是 "SwiftShader"、UA 里带 "HeadlessChrome"。谷歌看到这些就直接给验证码，
 # 跟「查得太频繁」是两回事。这里只做**让浏览器看起来正常**，不碰验证码本身
 # （验证码是谷歌的判定结果，硬破既不靠谱也没意义）。
-STEALTH_JS = r"""(() => {
+STEALTH_JS_TEMPLATE = r"""(() => {
   try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch (e) {}
   try {
-    if (!window.chrome) {
-      window.chrome = {runtime: {}, loadTimes: function () {}, csi: function () {}, app: {}};
+    if (!window.chrome) { window.chrome = {}; }
+    const ch = window.chrome;
+    if (!ch.runtime) { ch.runtime = {}; }
+    if (!ch.app) {
+      ch.app = {
+        isInstalled: false,
+        InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'},
+        RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'},
+        getDetails: function () { return null; },
+        getIsInstalled: function () { return false; }
+      };
     }
+    if (!ch.csi) { ch.csi = function () { return {}; }; }
+    if (!ch.loadTimes) { ch.loadTimes = function () { return {}; }; }
   } catch (e) {}
+  // plugins / mimeTypes 必须做成「类数组对象 + item/namedItem/refresh」，不能是裸数组：
+  // Array.isArray(navigator.plugins) === true 本身就是一处一眼假的异常特征；
+  // 真实 PluginArray 上 item()/namedItem() 缺失也会让检测脚本直接抛错。
   try {
-    const plugins = [
-      {name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-      {name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-      {name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+    const pdfMime = (plugin) => ({
+      type: 'application/pdf',
+      suffixes: 'pdf',
+      description: 'Portable Document Format',
+      enabledPlugin: plugin
+    });
+    const makePlugin = (name) => {
+      const plugin = {
+        name: name,
+        filename: 'internal-pdf-viewer',
+        description: 'Portable Document Format',
+        length: 1
+      };
+      plugin[0] = pdfMime(plugin);
+      plugin.item = function (i) { return this[i] || null; };
+      plugin.namedItem = function (n) { return n === 'application/pdf' ? this[0] : null; };
+      return plugin;
+    };
+    const names = [
+      'PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer',
+      'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'
     ];
+    const plugins = {length: names.length};
+    for (let i = 0; i < names.length; i++) { plugins[i] = makePlugin(names[i]); }
+    plugins.item = function (i) { return this[i] || null; };
+    plugins.namedItem = function (n) {
+      for (let i = 0; i < this.length; i++) { if (this[i].name === n) { return this[i]; } }
+      return null;
+    };
+    plugins.refresh = function () {};
+    if (typeof Symbol !== 'undefined' && Symbol.iterator) {
+      plugins[Symbol.iterator] = function () {
+        let i = 0;
+        return {next: () => (i < this.length ? {value: this[i++], done: false} : {value: undefined, done: true})};
+      };
+    }
     Object.defineProperty(navigator, 'plugins', {get: () => plugins});
-    Object.defineProperty(navigator, 'mimeTypes', {get: () => ({length: 0})});
+    const mimes = {length: 1};
+    mimes[0] = pdfMime(plugins[0]);
+    mimes.item = function (i) { return this[i] || null; };
+    mimes.namedItem = function (n) { return n === 'application/pdf' ? this[0] : null; };
+    Object.defineProperty(navigator, 'mimeTypes', {get: () => mimes});
+    // headless_shell 里这是 false，和上面「有 PDF 查看器」自相矛盾
+    Object.defineProperty(navigator, 'pdfViewerEnabled', {get: () => true});
   } catch (e) {}
   try {
-    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+    Object.defineProperty(navigator, 'languages', {get: () => __FFC_LANGUAGES__});
   } catch (e) {}
   try {
     const origQuery = navigator.permissions && navigator.permissions.query;
     if (origQuery) {
       navigator.permissions.query = (params) =>
-        params && params.name === 'notifications'
+        params && params.name === 'notifications' && typeof Notification !== 'undefined'
           ? Promise.resolve({state: Notification.permission, onchange: null})
           : origQuery.call(navigator.permissions, params);
     }
@@ -102,8 +252,113 @@ STEALTH_JS = r"""(() => {
   } catch (e) {}
 })();"""
 
-# 覆盖 UA 时用的语言，和 STEALTH_JS 里的 navigator.languages 保持一致
+
+def stealth_js(languages: tuple[str, ...] | list[str] = DEFAULT_LANGUAGES) -> str:
+    """生成这轮要注入的伪装脚本（navigator.languages 跟着 browser_region 走）。"""
+    langs = [str(item) for item in (languages or DEFAULT_LANGUAGES)]
+    return STEALTH_JS_TEMPLATE.replace(
+        "__FFC_LANGUAGES__", json.dumps(langs, ensure_ascii=False)
+    )
+
+
+# 兼容老名字：默认语言下的伪装脚本
+STEALTH_JS = stealth_js()
+
+# 覆盖 UA 时用的语言，和 STEALTH_JS 里的 navigator.languages 保持一致。
+# 注意：配了 browser_region 之后实际用的是 Locale.accept_language，这里只是默认值。
 STEALTH_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
+
+# ── 出口地区对齐（browser_region） ──────────────────────────────────────────
+#
+# 问题：容器时区（往往还是 UTC 或 Asia/Shanghai）、Chrome 的 UI 语言、navigator.languages、
+# 出口 IP 归属地，这四样只要不一致，就是一个「机器拼出来的环境」的强信号。
+# 处理：按出口 IP（或用户写死的国家码）把时区 + 语言一起对齐，让它们说同一套话。
+
+_IPINFO_URLS = ("https://ipinfo.io/json", "https://ipapi.co/json/")
+_LOCALE_TTL = 6 * 3600  # 出口地区很少变，6 小时足够了
+_locale_cache: dict[str, tuple[float, Locale]] = {}
+_bad_regions: set[str] = set()  # 配错的值只警告一次，别每次查询都刷日志
+
+
+def locale_for_country(country: str, timezone: str = "", source: str = "") -> Locale:
+    """国家码 → Locale。表里没有的国家按 en-US 处理（有 IP 时区就沿用 IP 的时区）。"""
+    code = (country or "").strip().upper()
+    tz, lang = _COUNTRY_LOCALE.get(code, ("", "en-US"))
+    return Locale(
+        timezone=(timezone or tz).strip(),
+        languages=_languages_for(lang),
+        source=source or (code or "未知"),
+    )
+
+
+async def _fetch_ip_info(url: str, proxy: str, timeout: float) -> dict:
+    from .net import request as http_request
+
+    result = await http_request(
+        "GET", url, proxy=proxy, headers={"Accept": "application/json"}, timeout=timeout
+    )
+    if not result.ok:
+        raise BrowserError(f"HTTP {result.status}")
+    data = json.loads(result.text)
+    if not isinstance(data, dict):
+        raise BrowserError("返回内容不是 JSON 对象")
+    return data
+
+
+async def resolve_locale(region: str, proxy: str = "", *, timeout: float = 6.0) -> Locale:
+    """把配置里的 ``browser_region`` 变成一个具体的「时区 + 语言」。
+
+    取值：
+    * 空 / ``off`` / ``none``  → 不改，保持 zh-CN + 容器时区（和 0.1.x 行为一致）
+    * ``auto``                → 走代理问一次 IP 归属地，再对齐时区与语言
+    * 国家码（``us`` / ``jp`` / ``hk`` …）→ 用内置表，不联网
+
+    失败一律退回默认值：这只是「锦上添花」的伪装，绝不能因为它让查询挂掉。
+    """
+    raw = (region or "").strip()
+    if not raw or raw.lower() in ("off", "none", "0", "false", "关"):
+        return DEFAULT_LOCALE
+    if raw.upper() in _COUNTRY_LOCALE:
+        return locale_for_country(raw, source=f"配置 {raw.upper()}")
+
+    if raw.lower() != "auto":
+        if raw.lower() not in _bad_regions:
+            _bad_regions.add(raw.lower())
+            logger.warning(
+                f"[鱼鱼找鸡] browser_region 只认 auto 或国家码（如 us / jp / hk），"
+                f"收到 {raw!r}，已按不改处理"
+            )
+        return DEFAULT_LOCALE
+
+    key = f"auto|{proxy}"
+    cached = _locale_cache.get(key)
+    if cached and time.monotonic() - cached[0] < _LOCALE_TTL:
+        return cached[1]
+
+    for url in _IPINFO_URLS:
+        try:
+            info = await _fetch_ip_info(url, proxy, timeout)
+        except Exception as exc:  # noqa: BLE001 - 查不到就当没配
+            logger.debug(f"[鱼鱼找鸡] 出口地区查询失败（{url}）：{exc}")
+            continue
+        country = str(info.get("country") or info.get("country_code") or "").strip()
+        timezone = str(info.get("timezone") or "").strip()
+        if not country and not timezone:
+            continue
+        loc = locale_for_country(country, timezone, source="auto")
+        _locale_cache[key] = (time.monotonic(), loc)
+        logger.info(
+            f"[鱼鱼找鸡] 出口地区 {country or '未知'} → 浏览器对齐为 {loc.describe()}"
+        )
+        return loc
+
+    logger.warning(
+        "[鱼鱼找鸡] browser_region=auto 但查不到出口地区，浏览器时区/语言保持默认"
+        "（6 小时内不再重试，重启插件可立即重查）"
+    )
+    # 失败也进缓存：ipinfo 被墙时每次查询都要白等两个超时，比「对齐失败」更糟。
+    _locale_cache[key] = (time.monotonic(), DEFAULT_LOCALE)
+    return DEFAULT_LOCALE
 
 # 启动前要清掉的 profile 锁/端口文件。上一次进程被 kill 后这些文件会留下来，
 # 新进程看到「已有实例占用 profile」会直接退出，日志里只有一行看不懂的 error。
@@ -161,14 +416,45 @@ def _version_of(dirname: str) -> int:
     return int(tail) if tail.isdigit() else 0
 
 
+# Playwright 的 `chromium-<rev>/` 目录内部结构。旧布局（不带架构后缀）在前，
+# 新布局在后；同一台机器上两套不会同时存在，顺序只影响命中的早晚，不影响正确性。
+_CHROMIUM_LAYOUTS = (
+    "chrome-linux/chrome",
+    "chrome-linux64/chrome",
+    "chrome-win/chrome.exe",
+    "chrome-win64/chrome.exe",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-mac-x64/Chromium.app/Contents/MacOS/Chromium",
+)
+
+# `chromium_headless_shell-<rev>/` 目录内部结构。注意新版的文件名也从
+# `headless_shell` 变成了 `chrome-headless-shell`，且目录名带平台后缀。
+_HEADLESS_SHELL_LAYOUTS = (
+    "chrome-linux/headless_shell",
+    "chrome-win/headless_shell.exe",
+    "chrome-headless-shell-linux64/chrome-headless-shell",
+    "chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+    "chrome-headless-shell-mac-x64/chrome-headless-shell",
+)
+
+
 def playwright_browser_candidates() -> list[str]:
     r"""Playwright 装在本机的 Chromium 路径（容器里最常见的一种「现成浏览器」）。
 
     Playwright 的浏览器不在 PATH 里，而是放在 ms-playwright 缓存目录下，所以要单独找：
 
-        /ms-playwright/chromium-1091/chrome-linux/chrome              ← 官方镜像
+        /ms-playwright/chromium-1091/chrome-linux/chrome              ← 老版本布局
+        /ms-playwright/chromium-1248/chrome-linux64/chrome            ← 新版本布局
         ~/.cache/ms-playwright/chromium-1091/chrome-linux/chrome      ← pip install playwright
         %LOCALAPPDATA%\ms-playwright\chromium-1091\chrome-win\chrome.exe
+
+    **目录布局换过一次**：Playwright 新版（Chromium revision ~1200 之后）把内层目录名
+    从 `chrome-linux` / `chrome-win` / `chrome-mac` 改成了带架构后缀的
+    `chrome-linux64` / `chrome-win64` / `chrome-mac-<arch>`，headless shell 也改成了
+    `chrome-headless-shell-<platform>64/chrome-headless-shell`。两套名字都得认，
+    否则会出现「明明装了 Playwright 却报找不到浏览器」。
 
     优先级：**完整 chromium 高于 chromium_headless_shell**。headless_shell 是精简版，
     天生只能无头运行、缺不少特性，只有在没有完整版时才退而求其次。
@@ -198,8 +484,8 @@ def playwright_browser_candidates() -> list[str]:
             continue
         # 完整版优先，其次 headless shell
         for prefix, rel in (
-            ("chromium-", ("chrome-linux/chrome", "chrome-win/chrome.exe", "chrome-mac/Chromium.app/Contents/MacOS/Chromium")),
-            ("chromium_headless_shell-", ("chrome-linux/headless_shell", "chrome-win/headless_shell.exe")),
+            ("chromium-", _CHROMIUM_LAYOUTS),
+            ("chromium_headless_shell-", _HEADLESS_SHELL_LAYOUTS),
         ):
             matches = sorted(
                 (p for p in entries if p.name.startswith(prefix)),
@@ -335,7 +621,7 @@ class _CDP:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 网络抖动，按断开处理
-            logger.debug("CDP reader 异常退出：{}", exc)
+            logger.debug(f"CDP reader 异常退出：{exc}")
         finally:
             # 连接断了必须把所有在等的 future 唤醒成异常，否则调用方会一直挂到超时。
             self._fail_pending("CDP 连接已断开")
@@ -348,7 +634,7 @@ class _CDP:
             try:
                 handler(data.get("params") or {})
             except Exception as exc:  # 回调出错不能把 reader 带崩
-                logger.debug("CDP 事件回调出错（{}）：{}", method, exc)
+                logger.debug(f"CDP 事件回调出错（{method}）：{exc}")
 
     def _fail_pending(self, reason: str) -> None:
         for fut in list(self._pending.values()):
@@ -416,33 +702,45 @@ def _short(obj: Any, limit: int = 160) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-async def apply_stealth(cdp: _CDP, *, reason: str = "") -> None:
-    """给一个 CDP 会话套上「正常浏览器」的伪装（UA + 指纹补丁）。
+async def apply_stealth(cdp: _CDP, *, reason: str = "", locale: Locale | None = None) -> None:
+    """给一个 CDP 会话套上「正常浏览器」的伪装（UA + 指纹补丁 + 时区/语言）。
 
     必须对**每个** target 都做一次：Emulation.setUserAgentOverride 只作用于当前页面，
     Page.addScriptToEvaluateOnNewDocument 只作用于之后新开的文档，两者都不能跨 target。
 
     外部浏览器（尤其是 Playwright 自带的 Chromium）最关键的一步就是 UA 覆盖 ——
     它的默认 UA 里带 "HeadlessChrome"，谷歌一眼就能认出来。
+    ``locale`` 里有时区时，一并覆盖 ``Date`` 看出来的时区（默认不动，跟随容器）。
     """
+    loc = locale or DEFAULT_LOCALE
     with contextlib.suppress(BrowserError):
         await cdp.send(
             "Emulation.setUserAgentOverride",
             {
                 "userAgent": USER_AGENT,
-                "acceptLanguage": STEALTH_LANGUAGE,
+                "acceptLanguage": loc.accept_language,
                 "platform": "Win32",
             },
             timeout=6,
         )
+    if loc.timezone:
+        # 只覆盖 JS 侧（Date / Intl）的时区，不动系统时区；无效 ID 会被谷歌浏览器拒绝，
+        # 这里吞掉并记一条 debug —— 不能因为伪装失败把整次查询拖死。
+        try:
+            await cdp.send(
+                "Emulation.setTimezoneOverride", {"timezoneId": loc.timezone}, timeout=6
+            )
+        except BrowserError as exc:
+            logger.debug(f"时区覆盖失败（{loc.timezone}）：{exc}")
+    script = stealth_js(loc.languages)
     with contextlib.suppress(BrowserError):
         await cdp.send(
-            "Page.addScriptToEvaluateOnNewDocument", {"source": STEALTH_JS}, timeout=8
+            "Page.addScriptToEvaluateOnNewDocument", {"source": script}, timeout=8
         )
     with contextlib.suppress(BrowserError):
-        await cdp.js(STEALTH_JS, timeout=5)
+        await cdp.js(script, timeout=5)
     if reason:
-        logger.debug("已应用浏览器伪装（{}）", reason)
+        logger.debug(f"已应用浏览器伪装（{reason}，{loc.describe()}）")
 
 
 # ── 标签页 ──────────────────────────────────────────────────────────────────
@@ -531,6 +829,7 @@ class Browser:
         host: str = "127.0.0.1",
         external: bool = False,
         insecure: bool = False,
+        locale: Locale | None = None,
     ) -> None:
         # proc 为 None = 外部浏览器（另一个容器/宿主机上跑着 Chrome），我们只连 CDP。
         self._proc = proc
@@ -545,6 +844,8 @@ class Browser:
         self._proxy = proxy
         self.profile_dir = profile_dir
         self._temp_profile = temp_profile
+        # 这轮对齐到的时区/语言；新开的每个标签页都要照着它重新伪装一遍。
+        self.locale = locale or DEFAULT_LOCALE
         self._main_ws_url = ""
         self._closed = False
         # 主页面操作要串行：一次查询会连着做「导航 → 注入表单 → 选文件 → 提交」，
@@ -669,7 +970,7 @@ class Browser:
             with contextlib.suppress(BrowserError):
                 await cdp.send("Network.enable", timeout=8)
             # 每个新标签页都要重新伪装：UA 覆盖和脚本注入都不跨 target。
-            await apply_stealth(cdp, reason="新标签页")
+            await apply_stealth(cdp, reason="新标签页", locale=self.locale)
         except Exception:
             await cdp.close()
             raise
@@ -696,7 +997,7 @@ class Browser:
                     if url:
                         return url, True
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            logger.debug("PUT /json/new 失败，准备退回 /json/list：{}", exc)
+            logger.debug(f"PUT /json/new 失败，准备退回 /json/list：{exc}")
 
         pages = await self._page_targets()
         for item in reversed(pages):
@@ -763,7 +1064,7 @@ class Browser:
                 continue
             if (resp.get("result") or {}).get("success"):
                 ok += 1
-        logger.info("已注入 {} 个 cookie（{}）", ok, domain)
+        logger.info(f"已注入 {ok} 个 cookie（{domain}）")
         return ok
 
     async def cookie_header(self, domain_suffix: str) -> str:
@@ -806,7 +1107,7 @@ class Browser:
                 with contextlib.suppress(Exception):
                     await self._http.close()
                 self._http = None
-            logger.debug("已断开外部浏览器（{}）", self._base_url)
+            logger.debug(f"已断开外部浏览器（{self._base_url}）")
             return
 
         # 先让浏览器体面退出。必须走 CDP 的 Browser.close：Windows 上 Edge 启动后会
@@ -830,14 +1131,14 @@ class Browser:
         # 否则每重启一次就漏一个无头浏览器在后台吃内存。
         await asyncio.sleep(0.4)
         if await self._debug_port_alive():
-            logger.debug("Browser.close 没关干净，按端口强杀（port={}）", self._port)
+            logger.debug(f"Browser.close 没关干净，按端口强杀（port={self._port}）")
             await self._kill_port_owner()
 
         # 顺手清锁文件：下次启动不会被「profile 已被占用」挡住。
         _clean_profile_locks(self.profile_dir)
         if self._temp_profile:
             shutil.rmtree(self.profile_dir, ignore_errors=True)
-        logger.debug("浏览器已关闭（port={}）", self._port)
+        logger.debug(f"浏览器已关闭（port={self._port}）")
 
     async def _debug_port_alive(self) -> bool:
         try:
@@ -909,7 +1210,14 @@ def _is_headless_shell(exe: str) -> bool:
     return "headless_shell" in name or "headless-shell" in name
 
 
-def _build_args(exe: str, proxy: str, profile_dir: Path, headless: bool) -> list[str]:
+def _build_args(
+    exe: str,
+    proxy: str,
+    profile_dir: Path,
+    headless: bool,
+    locale: Locale | None = None,
+) -> list[str]:
+    loc = locale or DEFAULT_LOCALE
     args = [exe]
     if proxy:
         # 代理只能通过启动参数给，运行中改不了 → get_browser 换代理时必须重启浏览器。
@@ -930,8 +1238,12 @@ def _build_args(exe: str, proxy: str, profile_dir: Path, headless: bool) -> list
         f"--user-agent={USER_AGENT}",
         f"--user-data-dir={profile_dir}",
         "--remote-debugging-port=0",
-        "about:blank",
     ]
+    if loc.active:
+        # --lang 定浏览器 UI 语言，--accept-lang 定初始 Accept-Language；
+        # 两者和后面 CDP 注入的时区/语言一起，才凑成一套自洽的地区信号。
+        args += [f"--lang={loc.language}", f"--accept-lang={loc.accept_language}"]
+    args.append("about:blank")
     if os.name != "nt":
         # Docker 里通常以 root 跑，Chromium 的沙箱在 root 下会直接退出码 1；
         # /dev/shm 小也是容器里的经典坑。
@@ -972,7 +1284,14 @@ async def _wait_port(proc: asyncio.subprocess.Process, profile_dir: Path) -> int
     raise BrowserError("浏览器 22 秒内没打开调试端口（可能被安全软件拦了，或 profile 被占用）")
 
 
-async def _launch(exe: str, proxy: str, profile_dir: str, headless: bool) -> Browser:
+async def _launch(
+    exe: str,
+    proxy: str,
+    profile_dir: str,
+    headless: bool,
+    locale: Locale | None = None,
+) -> Browser:
+    loc = locale or DEFAULT_LOCALE
     temp_profile = not (profile_dir or "").strip()
     prof = (
         Path(tempfile.mkdtemp(prefix="fishbrowser_"))
@@ -985,8 +1304,8 @@ async def _launch(exe: str, proxy: str, profile_dir: str, headless: bool) -> Bro
         raise BrowserError(f"profile 目录建不出来（{prof}）：{exc}") from exc
     _clean_profile_locks(prof)
 
-    args = _build_args(exe, proxy, prof, headless)
-    logger.debug("启动浏览器：{}", " ".join(args))
+    args = _build_args(exe, proxy, prof, headless, loc)
+    logger.debug(f"启动浏览器：{' '.join(args)}")
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -1027,7 +1346,7 @@ async def _launch(exe: str, proxy: str, profile_dir: str, headless: bool) -> Bro
         try:
             await cdp.send("Page.enable", timeout=10)
             await cdp.send("DOM.enable", timeout=10)
-            await apply_stealth(cdp, reason="本地浏览器")
+            await apply_stealth(cdp, reason="本地浏览器", locale=loc)
         except Exception:
             await cdp.close()
             raise
@@ -1050,9 +1369,10 @@ async def _launch(exe: str, proxy: str, profile_dir: str, headless: bool) -> Bro
         proxy=proxy,
         profile_dir=prof,
         temp_profile=temp_profile,
+        locale=loc,
     )
     browser._main_ws_url = ws_url
-    logger.info("无头浏览器就绪（pid={} port={}）", proc.pid, port)
+    logger.info(f"无头浏览器就绪（pid={proc.pid} port={port}）")
     return browser
 
 
@@ -1089,7 +1409,11 @@ def normalize_cdp_base(cdp_url: str) -> tuple[str, str, int]:
 
 
 async def _connect_remote(
-    cdp_url: str, *, headless: bool = True, insecure: bool = False
+    cdp_url: str,
+    *,
+    headless: bool = True,
+    insecure: bool = False,
+    locale: Locale | None = None,
 ) -> Browser:
     """连一个已经在跑的浏览器（不启动进程、不碰它的 profile）。
 
@@ -1104,7 +1428,8 @@ async def _connect_remote(
     base, host, port = normalize_cdp_base(cdp_url)
     # 只有 https 才涉及证书；http 的 ssl 参数没有意义
     ssl_arg = False if (insecure and base.startswith("https://")) else None
-    logger.info("连接外部浏览器 CDP：{}{}", base, "（忽略证书校验）" if ssl_arg is False else "")
+    ssl_note = "（忽略证书校验）" if ssl_arg is False else ""
+    logger.info(f"连接外部浏览器 CDP：{base}{ssl_note}")
 
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10), trust_env=False
@@ -1137,7 +1462,7 @@ async def _connect_remote(
                     data = await resp.json(content_type=None)
                     ws_url = str((data or {}).get("webSocketDebuggerUrl") or "")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            logger.debug("PUT /json/new 失败，退回已有标签页：{}", exc)
+            logger.debug(f"PUT /json/new 失败，退回已有标签页：{exc}")
 
         owned = bool(ws_url)
         if not ws_url:
@@ -1164,7 +1489,8 @@ async def _connect_remote(
             await cdp.send("Network.enable", timeout=8)
         # Playwright / 无头 Chromium 的默认 UA 带 "HeadlessChrome"，谷歌会直接给验证码。
         # 这两步（UA 覆盖 + 指纹补丁）是外部浏览器能不能用的关键。
-        await apply_stealth(cdp, reason="外部浏览器")
+        # 时区覆盖走 CDP，对远端浏览器同样有效 —— Chrome 容器常常是 UTC，比 AstrBot 容器更明显。
+        await apply_stealth(cdp, reason="外部浏览器", locale=locale)
     except Exception:
         await cdp.close()
         raise
@@ -1180,19 +1506,19 @@ async def _connect_remote(
         host=host,
         external=True,
         insecure=insecure,
+        locale=locale,
     )
     browser._main_ws_url = ws_url
     browser.external_target_owned = owned
-    logger.info(
-        "外部浏览器就绪（{}，{}）", base, (version or {}).get("Browser") or "版本未知"
-    )
+    browser_label = (version or {}).get("Browser") or "版本未知"
+    logger.info(f"外部浏览器就绪（{base}，{browser_label}）")
     return browser
 
 
 # ── 进程内单例 ──────────────────────────────────────────────────────────────
 
 _instance: Browser | None = None
-_instance_key: tuple[str, str, bool] = ("", "", True)
+_instance_key: tuple[Any, ...] = ()
 # asyncio.Lock 在 3.10+ 是「首次使用时绑定事件循环」，插件被重载后循环会换一个，
 # 老 Lock 再 await 就会抛 "attached to a different loop"。按循环分开存最省事。
 _locks: dict[int, asyncio.Lock] = {}
@@ -1218,23 +1544,30 @@ async def get_browser(
     headless: bool = True,
     cdp_url: str = "",
     cdp_insecure: bool = False,
+    region: str = "",
 ) -> Browser:
-    """拿浏览器单例；proxy / exe / headless / cdp_url 变了就重连（或重启）。
+    """拿浏览器单例；proxy / exe / headless / cdp_url / region 变了就重连（或重启）。
 
     两种模式：
     * `cdp_url` 为空 → 本地起一个无头浏览器（自己管进程、自己管 profile）；
     * `cdp_url` 非空 → 连一个已经在跑的浏览器（独立 Chrome 容器 / 宿主机 Chrome），
       插件不启动也不关闭它，只借用它的调试端口。
 
+    `region` 见 :func:`resolve_locale`：把时区/语言对齐到出口地区。
+    解析结果会进单例 key —— 改了配置（或过了缓存期换了个出口）就重启浏览器。
+
     为什么要单例：一次查询的冷启动是 1~2 秒，而且 Edge 会派生十几个子进程，
     每次查询都起一个的话，连续搜图很容易把机器拖死。
     """
     global _instance, _instance_key
 
+    locale = await resolve_locale(region, proxy)
+    loc_key = (locale.timezone, locale.languages)
+
     cdp_url = (cdp_url or "").strip()
     if cdp_url:
         base, _host, _port = normalize_cdp_base(cdp_url)
-        key = ("cdp", base, bool(headless), bool(cdp_insecure))
+        key = ("cdp", base, bool(headless), bool(cdp_insecure), loc_key)
         async with _lock_for_current_loop():
             if _instance is not None:
                 if _instance.alive and _instance_key == key:
@@ -1243,7 +1576,7 @@ async def get_browser(
                 await _instance.close()
                 _instance = None
             _instance = await _connect_remote(
-                cdp_url, headless=headless, insecure=cdp_insecure
+                cdp_url, headless=headless, insecure=cdp_insecure, locale=locale
             )
             _instance_key = key
             return _instance
@@ -1253,7 +1586,7 @@ async def get_browser(
         raise BrowserError(
             "browser_headless 关掉了，但选中的是 Playwright 的 headless_shell（精简版，天生无头）。"
             "要么把 browser_headless 打开，要么装完整版 Chromium 并把 browser_exe 指过去"
-            "（ms-playwright 目录下的 chromium-*/chrome-linux/chrome）"
+            "（ms-playwright 目录下的 chromium-*/chrome-linux/chrome 或 chrome-linux64/chrome）"
         )
     if not exe:
         raise BrowserError(
@@ -1262,17 +1595,17 @@ async def get_browser(
         )
     proxy = (proxy or "").strip()
     headless = bool(headless)
-    key = (proxy, exe, headless)
+    key = (proxy, exe, headless, loc_key)
 
     async with _lock_for_current_loop():
         if _instance is not None:
             if _instance.alive and _instance_key == key:
                 return _instance
-            reason = "已退出" if not _instance.alive else "代理/浏览器路径/有头模式变了"
-            logger.debug("重启浏览器（{}）", reason)
+            reason = "已退出" if not _instance.alive else "代理/浏览器路径/有头模式/地区变了"
+            logger.debug(f"重启浏览器（{reason}）")
             await _instance.close()
             _instance = None
-        _instance = await _launch(exe, proxy, profile_dir, headless)
+        _instance = await _launch(exe, proxy, profile_dir, headless, locale)
         _instance_key = key
         return _instance
 
@@ -1284,4 +1617,4 @@ async def close_browser() -> None:
         if _instance is not None:
             await _instance.close()
             _instance = None
-            _instance_key = ("", "", True)
+            _instance_key = ()

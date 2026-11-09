@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
 import re
@@ -21,6 +22,9 @@ from core.net import (  # noqa: E402
     sniff_mime,
 )
 from core.state import StateStore, day_key  # noqa: E402
+
+# logger 上那些「消息 + 额外参数」会被当成 % 插值的方法
+LOG_METHODS = {"debug", "info", "warning", "warn", "error", "exception", "critical"}
 
 
 class ProxyTest(unittest.TestCase):
@@ -193,16 +197,45 @@ class LoggingRuleTest(unittest.TestCase):
             self.assertIn("from astrbot.api import logger", text, name)
             self.assertNotIn("getLogger", text, name)
 
-    def test_stub_logger_formats_braces(self):
-        """AstrBot 的 logger 是 loguru，占位符是 `{}`，`%s` 会被原样打出来。"""
+    def test_stub_logger_uses_stdlib_percent_placeholders(self):
+        """AstrBot 4.29.4+ 的 logger 是标准库 logging：占位符 `%s`，不是 `{}`。"""
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import stub_astrbot
 
         record = stub_astrbot._StubLogger()
         record.threshold = 0
-        self.assertEqual(record._render("已注入 {} 个（{}）", (3, "x.com"), {}), "已注入 3 个（x.com）")
-        # 占位符写错也不能抛（日志不许打崩业务）
-        self.assertIn("已注入", record._render("已注入 %s", ("x",), {}))
+        self.assertEqual(
+            record._render("已注入 %s 个（%s）", (3, "x.com"), {}),
+            "已注入 3 个（x.com）",
+        )
+        # 没有额外参数时原样输出，消息里带 `%` 也不会被二次格式化
+        self.assertEqual(record._render("进度 100%", (), {}), "进度 100%")
+        # loguru 风格的 `{}` 一旦传参就会炸 —— 这就是 issue #1 的现场，桩不许兜住
+        with self.assertRaises(TypeError):
+            record._render("已注入 {} 个（{}）", (3, "x.com"), {})
+
+    def test_no_parametrized_log_calls(self):
+        """回归：日志只能用 f-string，不许「消息 + 额外参数」。
+
+        4.29.4 起 astrbot.api.logger 是标准库 logging，带额外参数时消息会走 `%` 插值，
+        写成 `{}` 就抛 TypeError（issue #1）。f-string 不产生额外参数，两边都安全。
+        """
+        offenders = []
+        for path in self.ROOT.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if not (isinstance(func, ast.Attribute) and func.attr in LOG_METHODS):
+                    continue
+                if not (isinstance(func.value, ast.Name) and func.value.id == "logger"):
+                    continue
+                if node.args[1:] or node.keywords:
+                    offenders.append(f"{path.relative_to(self.ROOT)}:{node.lineno}")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":
