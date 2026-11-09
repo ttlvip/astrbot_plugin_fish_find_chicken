@@ -353,7 +353,8 @@ $compareBase = ''
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
-    $prevTag = & git describe --tags --abbrev=0 HEAD 2>$null
+    # --exclude 当前 tag：重发同一个版本时，否则会算出 v0.1.3...v0.1.3 这种空对比链接
+    $prevTag = & git describe --tags --abbrev=0 --exclude $tag HEAD 2>$null
     if ($LASTEXITCODE -eq 0 -and $prevTag) { $compareBase = ($prevTag -join '').Trim() }
 } finally {
     $ErrorActionPreference = $prevEap
@@ -405,7 +406,13 @@ if (-not $tagExists) {
     $null = Invoke-Git push origin $tag
     Say "  [tag] $tag 已创建并推送" 'Green'
 } elseif ($Force) {
-    Say "  [tag] $tag 已存在，-Force：只更新 Release" 'Yellow'
+    $tagCommit = Invoke-Git rev-parse --short "$tag^{commit}"
+    $headCommit = Invoke-Git rev-parse --short HEAD
+    if ($tagCommit -ne $headCommit) {
+        Say "  [tag] $tag 指向 $tagCommit，HEAD 是 $headCommit：附件按 HEAD 打包，和 tag 内容不一致" 'Yellow'
+    } else {
+        Say "  [tag] $tag 已存在且指向 HEAD，-Force：只更新说明与附件" 'Yellow'
+    }
 }
 
 # ── 7. 建 Release ─────────────────────────────────────────────────────────
