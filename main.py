@@ -23,6 +23,7 @@ import json
 import re
 import shutil
 import tempfile
+import traceback
 from pathlib import Path
 
 import astrbot.api.message_components as Comp
@@ -46,6 +47,21 @@ PLUGIN_NAME = "astrbot_plugin_fish_find_chicken"
 PLUGIN_DIR = Path(__file__).resolve().parent
 
 WELCOME = "收到，开始找鸡 🐔"
+
+
+def _exception_text(exc: BaseException) -> str:
+    """把异常渲染成多行文本（含完整堆栈）。
+
+    刻意不用 `logger.error(msg, exc_info=True)`：AstrBot 4.29.4+ 的 logger 是标准库
+    logging 代理，额外参数会触发 `%` 插值（issue #1）。拼成 f-string 单参数，
+    在 loguru 旧版和标准库新版两边都安全，测试桩也能记录到原文。
+    """
+    try:
+        return "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ).rstrip()
+    except Exception:  # noqa: BLE001 - 渲染失败也不能把日志本身弄挂
+        return f"{type(exc).__name__}: {exc}"
 
 
 def _label_of(engine_id) -> str:
@@ -88,6 +104,65 @@ class FishFindChicken(Star):
         self._semaphore_limit: int | None = None
         self._temp_dirs: list[str] = []
 
+    # ── 日志 ────────────────────────────────────────────────────────────
+    def _debug_enabled(self, settings: Settings | None = None) -> bool:
+        """是否输出完整堆栈与逐引擎细节。
+
+        优先看插件配置 `verbose_errors`；否则跟随 AstrBot 给本插件解析出的有效
+        日志级别（4.29.4+ 的 `astrbot.api.logger` 代理会解析成
+        `astrbot.plugin.<name>`，包含 WebUI 里设置的插件专属级别）；
+        老版本 / 离线测试桩没有 getEffectiveLevel 时退回全局 `log_level`。
+        """
+        settings = settings if settings is not None else self._settings()
+        if settings.verbose_errors:
+            return True
+        try:
+            return int(logger.getEffectiveLevel()) <= 10  # 10 = logging.DEBUG
+        except Exception:  # noqa: BLE001 - 老版本 AstrBot / 离线测试桩
+            return (
+                str(self._global_config().get("log_level") or "").strip().upper()
+                == "DEBUG"
+            )
+
+    def _on_engine_log(
+        self,
+        line: str,
+        level: str = "DEBUG",
+        exc: BaseException | None = None,
+    ) -> None:
+        """引擎日志回调：分级输出，DEBUG 模式下给异常附完整堆栈。
+
+        所有 logger 调用都是「f-string 单参数」，避免标准库 logging 的 `%` 插值。
+        """
+        text = line
+        if exc is not None and self._debug_enabled():
+            text = f"{line}\n{_exception_text(exc)}"
+        level = str(level or "DEBUG").upper()
+        if level == "ERROR":
+            logger.error(f"{text}")
+        elif level == "WARNING":
+            logger.warning(f"{text}")
+        elif level == "INFO":
+            logger.info(f"{text}")
+        else:
+            logger.debug(f"{text}")
+
+    def _log_exception(
+        self,
+        where: str,
+        exc: BaseException,
+        settings: Settings | None = None,
+        level: str = "ERROR",
+    ) -> None:
+        """异常统一出口：任何日志级别下至少一行摘要，DEBUG 下带完整堆栈。"""
+        text = f"{where}：{type(exc).__name__}: {exc}"
+        if self._debug_enabled(settings):
+            text = f"{text}\n{_exception_text(exc)}"
+        if str(level).upper() == "WARNING":
+            logger.warning(f"{text}")
+        else:
+            logger.error(f"{text}")
+
     # ── 生命周期 ────────────────────────────────────────────────────────
     async def initialize(self):
         """插件加载时把「用哪套引擎、代理通不通、浏览器在不在」提前写进日志。"""
@@ -103,6 +178,16 @@ class FishFindChicken(Star):
         logger.info(
             f"[鱼鱼找鸡] 引擎：{','.join(settings.engines)}；代理：{proxy_text}；"
             f"超时：{settings.timeout_sec}s"
+        )
+        global_level = str(self._global_config().get("log_level") or "").upper() or "未知"
+        detail_state = (
+            "开"
+            if self._debug_enabled(settings)
+            else "关（把日志级别设为 DEBUG，或开 verbose_errors）"
+        )
+        logger.info(
+            f"[鱼鱼找鸡] 日志：AstrBot 全局级别 {global_level}；"
+            f"详细错误堆栈 {detail_state}"
         )
         if settings.browser_region:
             logger.info(
@@ -198,10 +283,11 @@ class FishFindChicken(Star):
         try:
             image_path = await self._resolve_image(event, arg, settings)
         except HttpError as exc:
+            self._log_exception("[鱼鱼找鸡] 取图失败", exc, settings, level="WARNING")
             yield event.plain_result(f"图没取到：{exc}")
             return
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[鱼鱼找鸡] 取图失败：{exc}")
+            self._log_exception("[鱼鱼找鸡] 取图失败", exc, settings, level="WARNING")
             yield event.plain_result(f"图没取到：{exc}")
             return
 
@@ -220,14 +306,15 @@ class FishFindChicken(Star):
                 f"引擎 {','.join(settings.engines)}"
             )
             result = await self._search(data, mime, settings)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            self._log_exception("[鱼鱼找鸡] 反查超时", exc, settings, level="WARNING")
             yield event.plain_result(
                 "查太久了，先放弃。\n"
                 "通常是谷歌 Lens 连不上：检查 AstrBot 设置里的 http_proxy 是否可用。"
             )
             return
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成一句人话
-            logger.error(f"[鱼鱼找鸡] 反查失败：{exc}")
+            self._log_exception("[鱼鱼找鸡] 反查失败", exc, settings)
             yield event.plain_result(f"反查出错了：{exc}")
             return
         finally:
@@ -410,8 +497,11 @@ class FishFindChicken(Star):
         if not config:
             return {}
         try:
-            # AstrBotConfig 是 dict 子类，直接取 http_proxy 即可
-            return {"http_proxy": config.get("http_proxy", "")}
+            # AstrBotConfig 是 dict 子类，直接取需要的键即可
+            return {
+                "http_proxy": config.get("http_proxy", ""),
+                "log_level": config.get("log_level", ""),
+            }
         except Exception:  # noqa: BLE001
             return {}
 
@@ -706,7 +796,7 @@ class FishFindChicken(Star):
                 mime,
                 settings=settings,
                 store=self._store,
-                on_log=lambda line: logger.debug(line),
+                on_log=self._on_engine_log,
             )
 
     @staticmethod
@@ -746,7 +836,8 @@ class FishFindChicken(Star):
             )
             # 只有 2xx/3xx 算通；407/403 说明代理或谷歌拦了，不能报「通」。
             return 200 <= result.status < 400
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[鱼鱼找鸡] 谷歌连通性探测失败：{type(exc).__name__}: {exc}")
             return False
 
     # ── 回话 ────────────────────────────────────────────────────────────
@@ -786,7 +877,8 @@ class FishFindChicken(Star):
         if HTTP_RE.match(raw):
             try:
                 return Comp.Image.fromURL(raw)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[鱼鱼找鸡] 命中图（网址）加载失败：{type(exc).__name__}: {exc}")
                 return None
         path = Path(raw)
         if not path.is_absolute():
@@ -794,6 +886,7 @@ class FishFindChicken(Star):
         if path.is_file():
             try:
                 return Comp.Image.fromFileSystem(str(path))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[鱼鱼找鸡] 命中图（本地）加载失败：{type(exc).__name__}: {exc}")
                 return None
         return None

@@ -41,6 +41,12 @@ class _StubLogger:
         self.threshold = _LEVELS.get(
             os.environ.get("FISH_STUB_LOG", "WARNING").upper(), _LEVELS["WARNING"]
         )
+        # 记录所有「已生成」的日志，供回归测试断言级别与内容（不受 threshold 影响）。
+        self.records: list[tuple[str, str]] = []
+
+    def getEffectiveLevel(self):
+        """模拟标准库 Logger.getEffectiveLevel，供插件判断是否处于 DEBUG。"""
+        return self.threshold
 
     @staticmethod
     def _render(message, args, kwargs) -> str:
@@ -57,9 +63,11 @@ class _StubLogger:
         return text % args
 
     def _emit(self, level: str, message, args, kwargs) -> None:
+        text = self._render(message, args, kwargs)
+        self.records.append((level, text))
         if _LEVELS.get(level, 0) < self.threshold:
             return
-        print(f"[{level}] {self._render(message, args, kwargs)}", file=sys.stderr)
+        print(f"[{level}] {text}", file=sys.stderr)
 
     def debug(self, message, *args, **kwargs):
         self._emit("DEBUG", message, args, kwargs)

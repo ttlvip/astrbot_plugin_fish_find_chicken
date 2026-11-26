@@ -283,12 +283,29 @@ async def reverse_search(
     engines_used: list[str] = []
     timeout = float(settings.timeout_sec)
 
-    def log(line: str) -> None:
-        if on_log:
+    def log(
+        line: str,
+        level: str = "DEBUG",
+        exc: BaseException | None = None,
+    ) -> None:
+        """引擎日志统一出口。
+
+        `level` 决定这条消息在 AstrBot 控制台的可见性：真故障用 WARNING/ERROR
+        （全局 INFO 下也能看到），过程日志/空结果留 DEBUG（DEBUG 模式下才展开）。
+        `exc` 交给插件层决定是否附完整堆栈 —— core 不碰日志实现，保持可离线测试。
+        """
+        if on_log is None:
+            return
+        try:
+            on_log(line, level, exc)
+        except TypeError:
+            # 兼容只收一个参数的旧回调（第三方/旧测试）
             try:
                 on_log(line)
-            except Exception:  # noqa: BLE001 - 日志出错不能影响结果
+            except Exception:  # noqa: BLE001
                 pass
+        except Exception:  # noqa: BLE001 - 日志出错不能影响结果
+            pass
 
     async def run_lens() -> None:
         started = asyncio.get_running_loop().time()
@@ -300,6 +317,7 @@ async def reverse_search(
                 from .serpapi import SerpApiError, serpapi_lens_search
             except Exception as exc:  # noqa: BLE001
                 failures.append({"engine": "lens", "reason": f"SerpApi 模块不可用：{exc}"})
+                log(f"[鱼鱼找鸡] lens（SerpApi）模块不可用：{exc}", "ERROR", exc)
                 return
             serpapi_timeout = max(timeout, 45.0)
             try:
@@ -322,14 +340,15 @@ async def reverse_search(
                     log(f"[鱼鱼找鸡] lens（SerpApi）空结果：{exc}")
                     return
                 failures.append({"engine": "lens", "reason": str(exc)})
-                log(f"[鱼鱼找鸡] lens（SerpApi）失败：{exc}")
+                log(f"[鱼鱼找鸡] lens（SerpApi）失败：{exc}", "WARNING", exc)
                 return
             except asyncio.TimeoutError:
                 failures.append({"engine": "lens", "reason": "SerpApi 超时"})
-                log("[鱼鱼找鸡] lens（SerpApi）超时")
+                log("[鱼鱼找鸡] lens（SerpApi）超时", "WARNING")
                 return
             except Exception as exc:  # noqa: BLE001
                 failures.append({"engine": "lens", "reason": str(exc) or exc.__class__.__name__})
+                log(f"[鱼鱼找鸡] lens（SerpApi）未预期异常：{exc}", "ERROR", exc)
                 return
             elapsed = (asyncio.get_running_loop().time() - started) * 1000
             engines_used.append("lens")
@@ -341,11 +360,13 @@ async def reverse_search(
             from .lens import LensError, browser_available, lens_search
         except Exception as exc:  # noqa: BLE001 - 缺文件/循环导入时给一条明确的失败
             failures.append({"engine": "lens", "reason": f"Lens 模块不可用：{exc}"})
+            log(f"[鱼鱼找鸡] lens 模块不可用：{exc}", "ERROR", exc)
             return
         if not browser_available(settings.browser_exe, settings.browser_cdp):
             failures.append(
                 {"engine": "lens", "reason": "没找到 Chrome/Edge，Lens 需要它来渲染结果页"}
             )
+            log("[鱼鱼找鸡] 没找到 Chrome/Edge，Lens 不可用", "WARNING")
             return
         try:
             found = await asyncio.wait_for(
@@ -368,15 +389,15 @@ async def reverse_search(
             )
         except LensError as exc:
             failures.append({"engine": "lens", "reason": str(exc)})
-            log(f"[鱼鱼找鸡] lens 失败：{exc}")
+            log(f"[鱼鱼找鸡] lens 失败：{exc}", "WARNING", exc)
             return
         except asyncio.TimeoutError:
             failures.append({"engine": "lens", "reason": "超时"})
-            log("[鱼鱼找鸡] lens 超时")
+            log("[鱼鱼找鸡] lens 超时", "WARNING")
             return
         except Exception as exc:  # noqa: BLE001
             failures.append({"engine": "lens", "reason": str(exc) or exc.__class__.__name__})
-            log(f"[鱼鱼找鸡] lens 失败：{exc}")
+            log(f"[鱼鱼找鸡] lens 未预期异常：{exc}", "ERROR", exc)
             return
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
         engines_used.append("lens")
@@ -391,6 +412,7 @@ async def reverse_search(
         runner = _NETWORK_RUNNERS.get(engine)
         if runner is None:
             failures.append({"engine": engine, "reason": "未实现的引擎"})
+            log(f"[鱼鱼找鸡] {engine} 未实现", "WARNING")
             return
         # IQDB 内部会把超时抬到至少 35 秒，外层必须盖得住，否则永远被外层先杀。
         outer = max(timeout, 35.0) + 10 if engine == "iqdb" else timeout + 10
@@ -401,15 +423,15 @@ async def reverse_search(
             )
         except asyncio.TimeoutError:
             failures.append({"engine": engine, "reason": "超时"})
-            log(f"[鱼鱼找鸡] {engine} 超时")
+            log(f"[鱼鱼找鸡] {engine} 超时", "WARNING")
             return
         except (EngineError, HttpError) as exc:
             failures.append({"engine": engine, "reason": str(exc)})
-            log(f"[鱼鱼找鸡] {engine} 失败：{exc}")
+            log(f"[鱼鱼找鸡] {engine} 失败：{exc}", "WARNING", exc)
             return
         except Exception as exc:  # noqa: BLE001
             failures.append({"engine": engine, "reason": str(exc) or exc.__class__.__name__})
-            log(f"[鱼鱼找鸡] {engine} 失败：{exc}")
+            log(f"[鱼鱼找鸡] {engine} 未预期异常：{exc}", "ERROR", exc)
             return
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
         engines_used.append(engine)

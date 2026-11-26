@@ -144,6 +144,12 @@
     "description": "回话里附上引擎与失败原因",
     "default": true
   },
+  "verbose_errors": {
+    "type": "bool",
+    "description": "把插件异常的完整堆栈打到控制台",
+    "default": false,
+    "hint": "默认跟随 AstrBot 日志级别：设为 DEBUG 时自动输出完整堆栈与逐引擎细节。开启本项则无论全局级别是什么都强制输出（ERROR/WARNING 级，保证控制台可见）。普通模式下的引擎故障仍会以 WARNING 摘要打印。"
+  },
   "found_image": {
     "type": "string",
     "description": "命中时附带的图片（路径或网址）",

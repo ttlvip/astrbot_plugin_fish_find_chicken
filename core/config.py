@@ -92,6 +92,7 @@ class Settings:
     notify_start: bool = True
     send_on_miss: bool = True
     show_engine_detail: bool = True
+    verbose_errors: bool = False
     found_image: str = ""
 
     max_image_mb: int = 20
@@ -159,6 +160,7 @@ class Settings:
             notify_start=_as_bool(cfg.get("notify_start"), True),
             send_on_miss=_as_bool(cfg.get("send_on_miss"), True),
             show_engine_detail=_as_bool(cfg.get("show_engine_detail"), True),
+            verbose_errors=_as_bool(cfg.get("verbose_errors"), False),
             found_image=str(cfg.get("found_image") or "").strip(),
             max_image_mb=max(1, _as_int(cfg.get("max_image_mb"), 20)),
             max_concurrent=max(1, _as_int(cfg.get("max_concurrent"), 1)),

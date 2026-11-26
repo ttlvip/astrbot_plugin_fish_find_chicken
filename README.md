@@ -178,6 +178,29 @@ git clone https://github.com/ttlvip/astrbot_plugin_fish_find_chicken.git
 如果连续搜索把谷歌惹毛了（返回「正在验证您的请求」的节流页），插件会等 2 秒替它重试一次；
 **撞到第 2 条节流页就停止解析剩余的，用手上已有的结果回话** —— 越敲越紧，硬刚只会升级成人机验证。
 
+### 看不到插件报错？把日志级别调到 DEBUG
+
+AstrBot 4.29.4 起每个插件有**独立的日志级别**（`astrbot.plugin.astrbot_plugin_fish_find_chicken`），
+默认跟随全局级别。全局是 `INFO` 时，插件里的 DEBUG 日志根本不会生成，所以控制台会显得
+「插件报错了但什么都没打印」。插件加载时会在日志里打一行当前状态，例如：
+
+```
+[鱼鱼找鸡] 日志：AstrBot 全局级别 INFO；详细错误堆栈 关（把日志级别设为 DEBUG，或开 verbose_errors）
+```
+
+想看到完整错误（含 Traceback）：
+
+1. **设置 → 常规 → 日志**，把控制台日志级别改成 `DEBUG`（或 `data/cmd_config.json` 的
+   `log_level` 改成 `DEBUG`）后保存；WebUI「数据与日志 → 日志」里可按插件名过滤。
+2. 如果之前在插件页给本插件**单独设过日志级别**，全局改 DEBUG 不会覆盖它，也要把它改成 DEBUG
+   （配置落在 `data/config/plugin_log_levels.json`）。
+3. 不想动全局级别时，把插件配置项 `verbose_errors` 打开：无论全局是什么级别，
+   异常都会以 `ERROR` / `WARNING` 附带完整堆栈输出。
+
+改完之后：普通 `INFO` 模式下，引擎故障、取图失败、反查异常至少会有一行
+`WARNING` / `ERROR` 摘要；`DEBUG` 模式下还会追加逐引擎过程日志和完整堆栈。
+插件的日志一律走 `astrbot.api.logger`，不会写独立日志文件。
+
 ## 六、Docker 部署
 
 Docker 里能不能用，只取决于三件事（和代码无关）：
