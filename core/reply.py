@@ -24,7 +24,7 @@ from .accounts import (
     platform_label,
 )
 from .engines import engine_labels
-from .textutil import host_of, trim_text
+from .textutil import host_of, looks_truncated_url, trim_text
 
 # 一条回话最多这么长：三个号的版式约 500 字，留足余量给链接和备注。
 # 超长时按行截断（见 `_fit`）—— 从链接中间切会让链接彻底失效。
@@ -57,13 +57,18 @@ def _match_link(account: dict) -> tuple[str, str]:
     否则等于把主页重复报一遍。
     """
     url = str(account.get("matchUrl") or "").strip()
-    if url:
+    if url and not looks_truncated_url(url):
         return url, str(account.get("matchTitle") or "").strip()
     if "matchUrl" in account:
+        # 明确算过 matchUrl（空、或被污染后清掉）就以它为准，别再退回 evidence
         return "", ""
     profile = str(account.get("url") or "").strip()
     evidence = str((account.get("evidence") or {}).get("sourceUrl") or "").strip()
-    if evidence.startswith("http") and is_specific_page(evidence, profile):
+    if (
+        evidence.startswith("http")
+        and not looks_truncated_url(evidence)
+        and is_specific_page(evidence, profile)
+    ):
         return evidence, ""
     return "", ""
 
@@ -88,7 +93,8 @@ def _ranked_sources(candidates, limit: int = 5, per_host: int = 2) -> list[dict]
     rows = []
     for index, item in enumerate(candidates or []):
         url = str(item.get("sourceUrl") or "").strip()
-        if not url:
+        # 被省略号截断的半截链接不给用户看：点不开，还占一条候选名额
+        if not url or looks_truncated_url(url):
             continue
         host = host_of(url)
         similarity = item.get("similarity")
@@ -224,14 +230,18 @@ def format_reply(
                 f"🆔 账号：{handle}{guess}",
             ]
             # 主页和「最相关」分两行写：一个用来认人，一个用来核图，混在一行会分不清哪个是哪个
-            if url:
+            if url and not looks_truncated_url(url):
                 block.append(f"🔗 主页：{url}")
             match_url, match_title = _match_link(account)
             if match_url:
                 has_match = True
                 line = f"🎯 最相关：{match_url}"
                 if match_title:
-                    line += f"｜{trim_text(match_title, 28)}"
+                    short = trim_text(match_title, 28)
+                    # Lens 卡片常把站点名和 URL 拼在一起当标题；截断后会变成
+                    # 「｜4Gamershttps://x.com/tomach…」，看着像又一条坏链接，索性不贴。
+                    if not ("http" in short and looks_truncated_url(short)):
+                        line += f"｜{short}"
                 block.append(line)
             blocks.append("\n".join(block))
 

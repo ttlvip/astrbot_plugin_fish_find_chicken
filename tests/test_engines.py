@@ -161,6 +161,39 @@ class ReplyTest(unittest.TestCase):
         self.assertNotIn("🎯 最相关", text)
         self.assertIn("只翻到主页", text)
 
+    def test_truncated_match_url_and_title_are_not_printed(self):
+        """真机反馈：带 … 的半截链接和半截 URL 标题都不能出现在回话里。"""
+        accounts = [
+            {
+                "platform": "twitter",
+                "handle": "@tomachan_02",
+                "url": "https://x.com/tomachan_02",
+                "matchUrl": "https://x.com/tomachan_02/status/1995804581335630…",
+                "matchTitle": "4Gamershttps://x.com/tomachan_02/status/1995804581335630…",
+                "authorName": "tomachan_02",
+                "confidence": "direct",
+                "evidence": {"engine": "lens", "similarity": None, "sourceUrl": ""},
+            }
+        ]
+        text = format_reply(accounts=accounts, engines_used=["lens"])
+        self.assertIn("🔗 主页：https://x.com/tomachan_02", text)
+        self.assertNotIn("🎯 最相关", text)
+        self.assertNotIn("1995804581335630…", text)
+        self.assertNotIn("4Gamershttps://x.com/tomach", text)
+        self.assertIn("只翻到主页", text)
+
+    def test_truncated_source_not_listed_as_candidate(self):
+        text = format_reply(
+            accounts=[],
+            candidates=[
+                {"engine": "lens", "sourceUrl": "https://x.com/a/status/123…", "title": "半截"},
+                {"engine": "lens", "sourceUrl": "https://x.com/b/status/456", "title": "完整"},
+            ],
+            engines_used=["lens"],
+        )
+        self.assertNotIn("123…", text)
+        self.assertIn("https://x.com/b/status/456", text)
+
     def test_legacy_account_uses_evidence_link(self):
         """没说 matchUrl 的老结构：evidence 里的具体页面仍要顶上来，主页则不能重复报。"""
         post = "https://x.com/izayoill/status/999"

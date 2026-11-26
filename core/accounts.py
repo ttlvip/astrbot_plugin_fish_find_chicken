@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote
 
-from .textutil import host_of, strip_tags, strip_tracking, trim_text
+from .textutil import host_of, looks_truncated_url, strip_tags, strip_tracking, trim_text
 
 # ── 平台规则 ──────────────────────────────────────────────────────────────
 # 命中的常常是某条推文（/status/…），但人问的是「账号」，所以一律收敛到主页地址。
@@ -179,6 +179,31 @@ PATH_DENY = {
 
 _URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>）)]+")
 _WEIBO_NICK = re.compile(r"weibo\.com/n/([^/?#]+)", re.I)
+
+
+def _urls_from_text(text) -> list[str]:
+    """从标题/摘要里抽 URL，但丢掉被源站省略过的那半截。
+
+    Lens 卡片、搜索摘要常把长链接显示成
+    ``https://x.com/id/status/1995804581335630…`` —— 省略号替代了末尾几位 id。
+    裸用 ``findall`` 会把 ``…`` 一并吸进 URL，发出去就是打不开的链接；
+    而如果把正则改成「遇到 … 就停」，又会得到一个 id 少几位、看着完整其实 404
+    的链接。两种都不能要，所以这里整条丢弃。
+
+    另外省略号若紧贴 URL 但没被吸进去（中间隔了空格），同样视为截断。
+    """
+    raw = str(text if text is not None else "")
+    out: list[str] = []
+    for match in _URL_IN_TEXT.finditer(raw):
+        url = match.group(0)
+        if looks_truncated_url(url):
+            continue
+        # 省略号若紧贴 URL 但没被吸进去（中间隔了空格），同样视为截断
+        tail = raw[match.end(): match.end() + 4].lstrip()
+        if tail.startswith(("…", "⋯", "...")):
+            continue
+        out.append(url)
+    return out
 
 
 def _clean_weibo(m: re.Match) -> dict:
@@ -441,9 +466,9 @@ def extract_accounts(candidates, max_accounts: int = 3, strict_names: bool = Tru
         ):
             if value:
                 urls.append(str(value))
-        # 标题/摘要里偶尔也带完整链接
+        # 标题/摘要里偶尔也带完整链接（被源站省略过的半截不算，见 _urls_from_text）
         for text in (candidate.get("title"), candidate.get("snippet")):
-            urls.extend(_URL_IN_TEXT.findall(str(text if text is not None else "")))
+            urls.extend(_urls_from_text(text))
 
         for url in urls:
             hit = match_platform(url)
@@ -668,13 +693,14 @@ def attach_match_links(accounts, candidates, consensus_name: str = "") -> None:
         ):
             if value:
                 urls.append(str(value))
-        # 标题/摘要里的完整链接也算证据（SauceNAO 的作者行有时只出现在文字里）
+        # 标题/摘要里的完整链接也算证据（SauceNAO 的作者行有时只出现在文字里）；
+        # 被省略号截断过的半截链接不能进池子，否则会被当成「最相关」发出去。
         for text in (candidate.get("title"), candidate.get("snippet")):
-            urls.extend(_URL_IN_TEXT.findall(str(text if text is not None else "")))
+            urls.extend(_urls_from_text(text))
 
         deduped: list[str] = []
         for url in urls:
-            if url.startswith("http") and url not in deduped:
+            if url.startswith("http") and not looks_truncated_url(url) and url not in deduped:
                 deduped.append(url)
         if not deduped:
             continue
@@ -708,6 +734,9 @@ def attach_match_links(accounts, candidates, consensus_name: str = "") -> None:
             if not (entry["handles"] & own or (evidence_url and evidence_url in entry["urls"])):
                 continue
             for url in entry["urls"]:
+                # 出口再守一道：任何带省略号的半截链接都不能当「最相关」报出去。
+                if looks_truncated_url(url):
+                    continue
                 if not is_specific_page(url, profile):
                     continue
                 linked = _linked_handles(url)

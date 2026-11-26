@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.accounts import (  # noqa: E402
+    _urls_from_text,
     account_name_of,
     display_handle,
     drop_weak_artwork,
@@ -20,6 +21,7 @@ from core.accounts import (  # noqa: E402
     match_platform,
     normalize_person_name,
 )
+from core.textutil import looks_truncated_url  # noqa: E402
 
 
 class MatchPlatformTest(unittest.TestCase):
@@ -330,6 +332,110 @@ class MatchLinkTest(unittest.TestCase):
         account = extract_accounts(candidates, strict_names=False)[0]
         self.assertEqual(account["handle"], "@izayoill")
         self.assertNotIn("someone_else", account["matchUrl"])
+
+
+class TruncatedUrlTest(unittest.TestCase):
+    """源站把长链接显示成 `…` 时，不能把半截链接报给用户。
+
+    真机反馈：「🎯 最相关：https://x.com/tomachan_02/status/1995804581335630…」
+    —— 推特 status id 是 19 位，省略号吃掉了末尾几位，点开必然 404。
+    """
+
+    def test_looks_truncated_url(self):
+        for bad in (
+            "https://x.com/a/status/123…",
+            "https://x.com/a/status/123...",
+            "https://x.com/a/status/123⋯",
+            "https://x.com/a/status/123···",
+            "https://x.com/…/status/123",
+        ):
+            self.assertTrue(looks_truncated_url(bad), bad)
+        for good in (
+            "https://x.com/a/status/1234567890123456789",
+            "https://www.pixiv.net/artworks/1?x=2",
+            "https://weibo.com/1234567890/Nabcdefg",
+        ):
+            self.assertFalse(looks_truncated_url(good), good)
+
+    def test_urls_from_text_drops_ellipsis_url(self):
+        text = (
+            "4Gamershttps://x.com/tomachan_02/status/1995804581335630…"
+            "｜4Gamershttps://x.com/tomach…"
+        )
+        self.assertEqual(_urls_from_text(text), [])
+        # 省略号与 URL 之间隔了空格，同样算截断
+        self.assertEqual(_urls_from_text("看这个 https://x.com/a/status/123 … 后面"), [])
+        # 正常链接照常抽出来
+        self.assertEqual(
+            _urls_from_text("出处 https://x.com/a/status/1234567890123456789 完"),
+            ["https://x.com/a/status/1234567890123456789"],
+        )
+
+    def test_truncated_title_does_not_become_match_url(self):
+        """标题里的半截 URL 不能当选「最相关」，但主页仍要报出来。"""
+        candidates = [
+            {
+                "engine": "lens",
+                "title": "X tomachan_02(@tomachan_02) / X",
+                "sourceUrl": "https://x.com/tomachan_02",
+                "links": ["https://x.com/tomachan_02"],
+            },
+            {
+                "engine": "lens",
+                "title": "4Gamershttps://x.com/tomachan_02/status/1995804581335630…",
+                "sourceUrl": "https://x.com/tomachan_02",
+                "links": [],
+            },
+        ]
+        accounts = extract_accounts(candidates)
+        self.assertEqual(len(accounts), 1)
+        account = accounts[0]
+        self.assertEqual(account["url"], "https://x.com/tomachan_02")
+        self.assertEqual(account["matchUrl"], "")
+
+    def test_source_url_with_ellipsis_is_not_attached(self):
+        candidates = [
+            {
+                "engine": "lens",
+                "title": "X tomachan_02(@tomachan_02) / X",
+                "sourceUrl": "https://x.com/tomachan_02",
+                "links": ["https://x.com/tomachan_02"],
+            },
+            {
+                "engine": "lens",
+                "title": "tomachan_02 的新图",
+                "sourceUrl": "https://x.com/tomachan_02/status/1995804581335630…",
+                "links": ["https://x.com/tomachan_02/status/1995804581335630…"],
+            },
+        ]
+        account = extract_accounts(candidates)[0]
+        self.assertEqual(account["matchUrl"], "")
+
+    def test_complete_link_wins_over_truncated_one(self):
+        """同一批结果里另有完整原帖时，过滤掉半截链接后它要能顶上来。"""
+        post = "https://x.com/tomachan_02/status/1995804581335630123"
+        candidates = [
+            {
+                "engine": "lens",
+                "title": "X tomachan_02(@tomachan_02) / X",
+                "sourceUrl": "https://x.com/tomachan_02",
+                "links": ["https://x.com/tomachan_02"],
+            },
+            {
+                "engine": "lens",
+                "title": "4Gamershttps://x.com/tomachan_02/status/1995804581335630…",
+                "sourceUrl": "https://x.com/tomachan_02",
+                "links": [],
+            },
+            {
+                "engine": "lens",
+                "title": "tomachan_02 的新图",
+                "sourceUrl": post,
+                "links": [post],
+            },
+        ]
+        account = extract_accounts(candidates)[0]
+        self.assertEqual(account["matchUrl"], post)
 
 
 class DropWeakArtworkTest(unittest.TestCase):
